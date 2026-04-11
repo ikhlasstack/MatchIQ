@@ -6,11 +6,27 @@
 #pip list | grep supervision
 
 import os
-# Something about model mismatch / SAM warning not important
+
+# Persist model weights so they aren't re-downloaded on every run.
+os.environ["MODEL_CACHE_DIR"] = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".model_cache")
+
+# Disable unused optional inference backends so import-time dependency warnings stay quiet.
 os.environ["CORE_MODEL_SAM_ENABLED"] = "False"
+os.environ["CORE_MODEL_SAM2_ENABLED"] = "False"
 os.environ["CORE_MODEL_SAM3_ENABLED"] = "False"
 os.environ["CORE_MODEL_GAZE_ENABLED"] = "False"
 os.environ["CORE_MODEL_YOLO_WORLD_ENABLED"] = "False"
+os.environ["PALIGEMMA_ENABLED"] = "False"
+os.environ["FLORENCE2_ENABLED"] = "False"
+os.environ["QWEN_2_5_ENABLED"] = "False"
+os.environ["QWEN_3_ENABLED"] = "False"
+os.environ["CORE_MODEL_CLIP_ENABLED"] = "False"
+os.environ["SMOLVLM2_ENABLED"] = "False"
+os.environ["DEPTH_ESTIMATION_ENABLED"] = "False"
+os.environ["MOONDREAM2_ENABLED"] = "False"
+os.environ["CORE_MODEL_TROCR_ENABLED"] = "False"
+os.environ["CORE_MODEL_GROUNDINGDINO_ENABLED"] = "False"
+os.environ["CORE_MODEL_PE_ENABLED"] = "False"
 
 from dotenv import load_dotenv
 from inference import get_model
@@ -44,6 +60,158 @@ load_dotenv()  # loads variables from .env into os.environ
 
 HF_TOKEN = os.getenv("HF_TOKEN")
 ROBOFLOW_API_KEY = os.getenv("ROBOFLOW_API_KEY")
+
+
+class RealTimePlayerTracker:
+    def __init__(self, source_video_path=SOURCE_VIDEO_PATH, confidence=CONFIDENCE, stride=30, min_crops=100):
+        self.source_video_path = source_video_path
+        self.confidence = confidence
+        self.stride = stride
+        self.min_crops = min_crops
+        self.player_model = get_model(
+            model_id="football-vgiqa-3njno/2",
+            api_key=ROBOFLOW_API_KEY,
+        )
+        self.field_model = get_model(
+            model_id="football-field-detection-f07vi/14",
+            api_key=ROBOFLOW_API_KEY,
+        )
+        self.config = SoccerPitchConfiguration()
+        self.tracker = sv.ByteTrack(
+            track_activation_threshold=0.25,
+            lost_track_buffer=100,
+            minimum_matching_threshold=0.8,
+            frame_rate=25,
+        )
+        self.tracker.reset()
+        self.team_classifier = None
+        self.team_crops = []
+        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        self._bootstrap_team_classifier()
+
+    def _bootstrap_team_classifier(self):
+        try:
+            for frame in sv.get_video_frames_generator(self.source_video_path, stride=self.stride):
+                result = self.player_model.infer(frame, confidence=self.confidence)[0]
+                detections = sv.Detections.from_inference(result)
+                players = detections[detections.class_id == PLAYER_ID]
+                self.team_crops.extend([sv.crop_image(frame, xyxy) for xyxy in players.xyxy])
+                if len(self.team_crops) >= self.min_crops:
+                    break
+        except Exception:
+            self.team_crops = []
+
+        if self.team_crops:
+            self.team_classifier = TeamClassifier(device=self.device)
+            self.team_classifier.fit(self.team_crops)
+
+    def _resolve_transformer(self, frame):
+        try:
+            field_result = self.field_model.infer(frame, confidence=0.3)[0]
+            key_points = sv.KeyPoints.from_inference(field_result)
+            kp_filter = key_points.confidence[0] > 0.5
+            frame_ref = key_points.xy[0][kp_filter]
+            pitch_ref = np.array(self.config.vertices)[kp_filter]
+            if len(frame_ref) >= 4:
+                return ViewTransformer(source=frame_ref, target=pitch_ref)
+        except Exception:
+            return None
+        return None
+
+    def process_frame(self, frame, frame_id):
+        result = self.player_model.infer(frame, confidence=self.confidence)[0]
+        detections = sv.Detections.from_inference(result)
+
+        ball_detections = detections[detections.class_id == BALL_ID]
+        if len(ball_detections) > 0:
+            ball_detections.xyxy = sv.pad_boxes(xyxy=ball_detections.xyxy, px=10)
+
+        non_ball = detections[detections.class_id != BALL_ID]
+        non_ball = non_ball.with_nms(threshold=0.5, class_agnostic=False)
+        non_ball = self.tracker.update_with_detections(detections=non_ball)
+
+        goalkeepers = non_ball[non_ball.class_id == GOALKEEPER_ID]
+        players = non_ball[non_ball.class_id == PLAYER_ID]
+        referees = non_ball[non_ball.class_id == REFEREE_ID]
+
+        if len(players) > 0:
+            player_crops = [sv.crop_image(frame, xyxy) for xyxy in players.xyxy]
+            if self.team_classifier is None:
+                self.team_crops.extend(player_crops)
+                if len(self.team_crops) >= self.min_crops:
+                    self.team_classifier = TeamClassifier(device=self.device)
+                    self.team_classifier.fit(self.team_crops)
+            if self.team_classifier is not None:
+                players.class_id = self.team_classifier.predict(player_crops)
+            else:
+                players.class_id = np.full(len(players), -1, dtype=int)
+
+        if len(goalkeepers) > 0 and len(players) > 0 and np.any(players.class_id >= 0):
+            goalkeepers.class_id = resolve_goalkeepers_team_id(players, goalkeepers)
+        elif len(goalkeepers) > 0:
+            goalkeepers.class_id = np.full(len(goalkeepers), -1, dtype=int)
+
+        if len(referees) > 0:
+            referees.class_id = np.full(len(referees), -1, dtype=int)
+
+        tracked = sv.Detections.merge([players, goalkeepers, referees])
+        transformer = self._resolve_transformer(frame)
+        has_transform = transformer is not None
+
+        frame_detections = []
+        if tracked.tracker_id is not None and len(tracked) > 0:
+            positions = tracked.get_anchors_coordinates(sv.Position.BOTTOM_CENTER)
+            pitch_positions = transformer.transform_points(positions) if has_transform else [[None, None]] * len(positions)
+            goalkeeper_ids = set(goalkeepers.tracker_id.tolist()) if goalkeepers.tracker_id is not None else set()
+            referee_ids = set(referees.tracker_id.tolist()) if referees.tracker_id is not None else set()
+
+            for index, tracker_id in enumerate(tracked.tracker_id):
+                if tracker_id is None:
+                    continue
+                role = 'player'
+                if int(tracker_id) in goalkeeper_ids:
+                    role = 'goalkeeper'
+                elif int(tracker_id) in referee_ids:
+                    role = 'referee'
+
+                bbox = tracked.xyxy[index].tolist()
+                frame_detections.append({
+                    'frame': frame_id,
+                    'player_id': int(tracker_id),
+                    'bbox': [float(coord) for coord in bbox],
+                    'x': float(positions[index][0]),
+                    'y': float(positions[index][1]),
+                    'pitch_x': float(pitch_positions[index][0]) if has_transform else None,
+                    'pitch_y': float(pitch_positions[index][1]) if has_transform else None,
+                    'role': role,
+                    'team_id': int(tracked.class_id[index]) if tracked.class_id is not None else -1,
+                    'confidence': float(tracked.confidence[index]),
+                })
+
+        if len(ball_detections) > 0:
+            for index, xyxy in enumerate(ball_detections.xyxy):
+                bx = float((xyxy[0] + xyxy[2]) / 2)
+                by = float((xyxy[1] + xyxy[3]) / 2)
+                pitch_x = None
+                pitch_y = None
+                if has_transform:
+                    transformed = transformer.transform_points(np.array([[bx, by]]))
+                    pitch_x = float(transformed[0][0])
+                    pitch_y = float(transformed[0][1])
+                frame_detections.append({
+                    'frame': frame_id,
+                    'player_id': -1,
+                    'bbox': [float(coord) for coord in xyxy.tolist()],
+                    'x': bx,
+                    'y': by,
+                    'pitch_x': pitch_x,
+                    'pitch_y': pitch_y,
+                    'role': 'ball',
+                    'team_id': -1,
+                    'confidence': float(ball_detections.confidence[index]),
+                })
+
+        return frame_detections
 
 
 def resolve_goalkeepers_team_id(players, goalkeepers):

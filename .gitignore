@@ -1,11 +1,16 @@
 .env
 */.env
 ./venv/
+venv/
 __pycache__
 *.pyc
 
-node_server/node_modules/
+**/node_modules/
+node_modules/
 package-lock.json
 .vscode/
 
-Test_Data/tracked_output.mp4
+Test_Data/
+.model_cache/
+Completed_Videos/*.mp4
+uploads/

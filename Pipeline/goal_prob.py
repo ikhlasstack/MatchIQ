@@ -1,6 +1,32 @@
 import pandas as pd
 import numpy as np
 
+PITCH_X_MIN = 1405.4
+PITCH_X_MAX = 11780.6
+PITCH_Y_MIN = 46.9
+PITCH_Y_MAX = 7082.8
+REAL_LENGTH = 105
+REAL_WIDTH = 68
+GOAL_LEFT = np.array([0, REAL_WIDTH / 2])
+GOAL_RIGHT = np.array([REAL_LENGTH, REAL_WIDTH / 2])
+
+
+def normalize_pitch_coordinates(pitch_x, pitch_y):
+    if pitch_x is None or pitch_y is None:
+        return None, None
+
+    pitch_x = float(pitch_x)
+    pitch_y = float(pitch_y)
+
+    if 0 <= pitch_x <= REAL_LENGTH and 0 <= pitch_y <= REAL_WIDTH:
+        return pitch_x, pitch_y
+
+    normalized_x = ((pitch_x - PITCH_X_MIN) / (PITCH_X_MAX - PITCH_X_MIN)) * REAL_LENGTH
+    normalized_y = ((pitch_y - PITCH_Y_MIN) / (PITCH_Y_MAX - PITCH_Y_MIN)) * REAL_WIDTH
+    normalized_x = float(np.clip(normalized_x, 0, REAL_LENGTH))
+    normalized_y = float(np.clip(normalized_y, 0, REAL_WIDTH))
+    return normalized_x, normalized_y
+
 def distance_to_nearest_goal(pitch_x, pitch_y,GOAL_LEFT,GOAL_RIGHT):
     """
     Calculate distance from player to the nearest goal center.
@@ -109,6 +135,58 @@ def calculate_goal_probability(distance, angle, speed, defender_dist):
     )
 
     return round(probability, 3)
+
+
+def get_frame_goal_probabilities(detections, movement_by_player):
+    players = []
+    for det in detections:
+        if det.get('role') != 'player':
+            continue
+
+        pitch_x_m, pitch_y_m = normalize_pitch_coordinates(det.get('pitch_x'), det.get('pitch_y'))
+        if pitch_x_m is None or pitch_y_m is None:
+            continue
+
+        enriched = dict(det)
+        enriched['pitch_x_m'] = pitch_x_m
+        enriched['pitch_y_m'] = pitch_y_m
+        players.append(enriched)
+
+    goal_probabilities = {}
+    for player in players:
+        player_id = player['player_id']
+        movement = movement_by_player.get(player_id, {})
+        speed = float(movement.get('speed', 0.0))
+
+        opponent_distances = []
+        for opponent in players:
+            if opponent['player_id'] == player_id:
+                continue
+            if opponent.get('team_id') == player.get('team_id'):
+                continue
+            opponent_distances.append(
+                float(np.hypot(
+                    opponent['pitch_x_m'] - player['pitch_x_m'],
+                    opponent['pitch_y_m'] - player['pitch_y_m'],
+                ))
+            )
+
+        defender_distance = min(opponent_distances) if opponent_distances else 999.0
+        distance_to_goal = distance_to_nearest_goal(player['pitch_x_m'], player['pitch_y_m'], GOAL_LEFT, GOAL_RIGHT)
+        angle = angle_to_goal(player['pitch_x_m'], player['pitch_y_m'])
+        probability = calculate_goal_probability(distance_to_goal, angle, speed, defender_distance)
+
+        goal_probabilities[player_id] = {
+            'player_id': player_id,
+            'team_id': player.get('team_id'),
+            'distance_to_goal': round(float(distance_to_goal), 3),
+            'angle_to_goal': round(float(angle), 3),
+            'speed': round(speed, 3),
+            'defender_distance': round(float(defender_distance), 3),
+            'goal_probability': probability,
+        }
+
+    return goal_probabilities
 
 
 
