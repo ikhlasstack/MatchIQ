@@ -1,3 +1,16 @@
 .env
+*/.env
+./venv/
+venv/
+__pycache__
+*.pyc
 
+**/node_modules/
+node_modules/
+package-lock.json
+.vscode/
 
+Test_Data/
+.model_cache/
+Completed_Videos/*.mp4
+uploads/

@@ -1,5 +1,104 @@
 import pandas as pd
 import numpy as np
+from collections import defaultdict, deque
+
+try:
+    from .goal_prob import normalize_pitch_coordinates
+except ImportError:
+    from goal_prob import normalize_pitch_coordinates
+
+
+class MatchOutcomeTracker:
+    def __init__(self, shot_threshold=0.65, momentum_window=120, shot_cooldown=15):
+        self.shot_threshold = shot_threshold
+        self.momentum_window = momentum_window
+        self.shot_cooldown = shot_cooldown
+        self.possession_counts = defaultdict(int)
+        self.territory_counts = defaultdict(int)
+        self.team_frame_counts = defaultdict(int)
+        self.shots = defaultdict(int)
+        self.danger_totals = defaultdict(float)
+        self.danger_counts = defaultdict(int)
+        self.recent_speeds = {0: deque(maxlen=momentum_window), 1: deque(maxlen=momentum_window)}
+        self.last_shot_frame = {}
+
+    def process_frame(self, frame_id, detections, movement_by_player, goal_probabilities):
+        players = [det for det in detections if det.get('role') in {'player', 'goalkeeper'} and det.get('team_id') in {0, 1}]
+        ball = next((det for det in detections if det.get('role') == 'ball'), None)
+
+        if ball is not None and players:
+            owner = min(
+                players,
+                key=lambda det: float(np.hypot(det.get('x', 0.0) - ball.get('x', 0.0), det.get('y', 0.0) - ball.get('y', 0.0))),
+            )
+            self.possession_counts[owner['team_id']] += 1
+
+        for det in players:
+            team_id = det.get('team_id')
+            pitch_x, _ = normalize_pitch_coordinates(det.get('pitch_x'), det.get('pitch_y'))
+            if pitch_x is None:
+                continue
+            self.team_frame_counts[team_id] += 1
+            attacking = (team_id == 0 and pitch_x > 52.5) or (team_id == 1 and pitch_x < 52.5)
+            if attacking:
+                self.territory_counts[team_id] += 1
+
+            movement = movement_by_player.get(det.get('player_id'))
+            if movement is not None:
+                self.recent_speeds[team_id].append(float(movement.get('speed', 0.0)))
+
+        for player_id, goal_data in goal_probabilities.items():
+            team_id = goal_data.get('team_id')
+            probability = float(goal_data.get('goal_probability', 0.0))
+            self.danger_totals[team_id] += probability
+            self.danger_counts[team_id] += 1
+
+            if probability >= self.shot_threshold:
+                previous_frame = self.last_shot_frame.get(player_id, -self.shot_cooldown)
+                if frame_id - previous_frame >= self.shot_cooldown:
+                    self.shots[team_id] += 1
+                    self.last_shot_frame[player_id] = frame_id
+
+        total_possessions = sum(self.possession_counts.values())
+        possession = {
+            0: round((self.possession_counts[0] / total_possessions) * 100, 1) if total_possessions else 50.0,
+            1: round((self.possession_counts[1] / total_possessions) * 100, 1) if total_possessions else 50.0,
+        }
+        territory = {
+            0: round((self.territory_counts[0] / self.team_frame_counts[0]) * 100, 1) if self.team_frame_counts[0] else 50.0,
+            1: round((self.territory_counts[1] / self.team_frame_counts[1]) * 100, 1) if self.team_frame_counts[1] else 50.0,
+        }
+        avg_danger = {
+            0: round(self.danger_totals[0] / self.danger_counts[0], 3) if self.danger_counts[0] else 0.0,
+            1: round(self.danger_totals[1] / self.danger_counts[1], 3) if self.danger_counts[1] else 0.0,
+        }
+
+        speed0 = float(np.mean(self.recent_speeds[0])) if self.recent_speeds[0] else 0.0
+        speed1 = float(np.mean(self.recent_speeds[1])) if self.recent_speeds[1] else 0.0
+        total_speed = speed0 + speed1
+        momentum = {
+            0: round((speed0 / total_speed) * 100, 1) if total_speed else 50.0,
+            1: round((speed1 / total_speed) * 100, 1) if total_speed else 50.0,
+        }
+
+        shots = {0: int(self.shots[0]), 1: int(self.shots[1])}
+        win0, draw, win1, _ = calculate_match_outcome(possession, shots, territory, momentum, avg_danger)
+
+        return {
+            'possession_team0': possession[0],
+            'possession_team1': possession[1],
+            'shots_team0': shots[0],
+            'shots_team1': shots[1],
+            'avg_danger_team0': avg_danger[0],
+            'avg_danger_team1': avg_danger[1],
+            'territory_team0': territory[0],
+            'territory_team1': territory[1],
+            'momentum_team0': momentum[0],
+            'momentum_team1': momentum[1],
+            'win_prob_team0': win0,
+            'draw_prob': draw,
+            'win_prob_team1': win1,
+        }
 
 def calculate_match_outcome(possession, shots, territory, momentum, avg_danger):
     """
@@ -53,9 +152,9 @@ def calculate_match_outcome(possession, shots, territory, momentum, avg_danger):
 
 
 def Match_Outcome():
-    tracking_df    = pd.read_csv('tracking.csv')
-    goal_prob_df   = pd.read_csv('goal_predictions.csv')
-    movement_df    = pd.read_csv('movement_features.csv')
+    tracking_df    = pd.read_csv('Math_Data_CSV/1_tracking.csv')
+    goal_prob_df   = pd.read_csv('Math_Data_CSV/4_goal_predictions.csv')
+    movement_df    = pd.read_csv('Math_Data_CSV/2_Movement_Features.csv')
 
     #Possession
     ball_df    = tracking_df[tracking_df['role'] == 'ball'][['frame','x','y']].rename(columns={'x':'ball_x','y':'ball_y'})
@@ -170,7 +269,7 @@ def Match_Outcome():
     }
 
     outcome_df = pd.DataFrame([match_outcome])
-    outcome_df.to_csv('match_predictions.csv', index=False)
+    outcome_df.to_csv('Math_Data_CSV/1_match_predictions.csv', index=False)
 
 
 
