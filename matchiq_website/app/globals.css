@@ -1,0 +1,109 @@
+@import "tailwindcss";
+
+/* ─── Tell Tailwind v4 to scan ALL tsx/ts files recursively ─────────────── */
+@source "../app/**/*.{ts,tsx}";
+@source "../components/**/*.{ts,tsx}";
+
+/* ─── Brand tokens ──────────────────────────────────────────────────────── */
+:root {
+  --bg:       #0a0a0a;
+  --surface:  #111111;
+  --surface2: #1a1a1a;
+  --gold:     #D4AF37;
+  --gold-h:   #F5C842;
+  --border:   #2a2a2a;
+  --glow:     rgba(212, 175, 55, 0.15);
+  --text:     #ffffff;
+  --muted:    #888888;
+}
+
+@theme inline {
+  --color-background: var(--bg);
+  --color-foreground: var(--text);
+  --color-gold:       var(--gold);
+  --color-gold-h:     var(--gold-h);
+  --color-surface:    var(--surface);
+  --color-surface2:   var(--surface2);
+  --color-border:     var(--border);
+  --color-muted:      var(--muted);
+}
+
+/* ─── Base reset ────────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; }
+html  { scroll-behavior: smooth; }
+body  {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-geist-sans), Inter, system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+
+/* ─── Custom scrollbar ──────────────────────────────────────────────────── */
+::-webkit-scrollbar        { width: 5px; }
+::-webkit-scrollbar-track  { background: var(--bg); }
+::-webkit-scrollbar-thumb  { background: #333; border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: var(--gold); }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   GUARANTEED LAYOUT HELPERS
+   These work even if Tailwind v4 class-scanning misses the component files.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* Centred, max-width container with responsive horizontal padding */
+.wrap {
+  width: 100%;
+  max-width: 80rem;          /* 1280px = 7xl */
+  margin-left:  auto;
+  margin-right: auto;
+  padding-left: 1rem;        /* px-4 */
+  padding-right: 1rem;
+}
+@media (min-width: 640px) {
+  .wrap { padding-left: 1.5rem; padding-right: 1.5rem; } /* sm:px-6 */
+}
+@media (min-width: 1024px) {
+  .wrap { padding-left: 2rem;  padding-right: 2rem;  }   /* lg:px-8 */
+}
+
+/* Section vertical rhythm */
+.section-y  { padding-top: 6rem;  padding-bottom: 6rem;  }  /* py-24 */
+.section-ys { padding-top: 4rem;  padding-bottom: 4rem;  }  /* py-16 */
+
+/* ─── Animations ────────────────────────────────────────────────────────── */
+@keyframes pitchPan {
+  0%   { transform: translateY(0) translateX(0); }
+  50%  { transform: translateY(-20px) translateX(-10px); }
+  100% { transform: translateY(0) translateX(0); }
+}
+
+@keyframes ticker {
+  from { transform: translateX(0); }
+  to   { transform: translateX(-50%); }
+}
+.ticker-track {
+  display: flex;
+  animation: ticker 20s linear infinite;
+  width: max-content;
+}
+
+@keyframes goldPulse {
+  0%, 100% { text-shadow: 0 0 10px rgba(212,175,55,0.4); }
+  50%       { text-shadow: 0 0 30px rgba(212,175,55,0.9); }
+}
+.gold-pulse { animation: goldPulse 2.5s ease-in-out infinite; }
+
+/* ─── Reusable micro-styles ─────────────────────────────────────────────── */
+.gold-glow   { box-shadow: 0 0 20px rgba(212,175,55,0.25); }
+.gold-text   { color: var(--gold); }
+.gold-border { border-color: var(--gold); }
+
+.card-hover {
+  transition: border-color 0.3s ease, box-shadow 0.3s ease, transform 0.3s ease;
+}
+.card-hover:hover {
+  border-color: rgba(212,175,55,0.5) !important;
+  box-shadow:   0 0 28px rgba(212,175,55,0.12);
+  transform:    translateY(-4px);
+}

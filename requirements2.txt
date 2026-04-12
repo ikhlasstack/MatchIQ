@@ -1,7 +1,8 @@
 --extra-index-url https://download.pytorch.org/whl/cu121
 
 # Core ML / Computer Vision
-torch==2.5.1+cu121
+#torch==2.5.1+cu121
+# i have cpu so i did pip3 install torch torchvision
 numpy==2.3.5
 opencv-contrib-python==4.10.0.84
 supervision==0.27.0.post2
