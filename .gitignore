@@ -14,3 +14,5 @@ Test_Data/
 .model_cache/
 Completed_Videos/*.mp4
 uploads/
+for vitutal env.txt
+Match_Data_CSV/

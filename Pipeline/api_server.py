@@ -1,0 +1,263 @@
+"""
+MatchIQ FastAPI Backend
+========================
+Start from the Pipeline/ folder:
+
+    uvicorn api_server:app --port 8000
+
+Then open: http://localhost:3000/demo
+"""
+
+import io
+import os
+import sys
+import threading
+import zipfile
+from pathlib import Path
+
+import pandas as pd
+from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, StreamingResponse
+
+# ── Resolve project paths ──────────────────────────────────────────────────────
+PIPELINE_DIR  = Path(__file__).parent.resolve()
+PROJECT_ROOT  = PIPELINE_DIR.parent
+TEST_DATA_DIR = PROJECT_ROOT / "Test_Data"
+CSV_DIR       = PROJECT_ROOT / "Match_Data_CSV"
+INPUT_VIDEO   = TEST_DATA_DIR / "Testing.mp4"
+TRACKED_VIDEO = TEST_DATA_DIR / "tracked_output.mp4"
+
+# Pipeline scripts use CWD-relative paths — must be PROJECT_ROOT
+os.chdir(PROJECT_ROOT)
+sys.path.insert(0, str(PIPELINE_DIR))
+
+# ── Pitch coordinate normalisation ─────────────────────────────────────────────
+_PX_MIN, _PX_MAX = 1405.4, 11780.6
+_PY_MIN, _PY_MAX = 46.9,   7082.8
+
+
+def _norm_pct(px, py):
+    try:
+        px, py = float(px), float(py)
+    except (TypeError, ValueError):
+        return None, None
+    if 0 <= px <= 105 and 0 <= py <= 68:          # already in metres
+        return round(px / 105 * 100, 2), round(py / 68 * 100, 2)
+    x = (px - _PX_MIN) / (_PX_MAX - _PX_MIN) * 100
+    y = (py - _PY_MIN) / (_PY_MAX - _PY_MIN) * 100
+    return round(max(0.0, min(100.0, x)), 2), round(max(0.0, min(100.0, y)), 2)
+
+
+# ── Shared pipeline status ─────────────────────────────────────────────────────
+_STATUS: dict = {"phase": 0, "done": False, "error": None, "running": False}
+_lock = threading.Lock()
+
+
+def _set(**kw):
+    with _lock:
+        _STATUS.update(kw)
+
+
+# ── Background pipeline runner (imports happen here, NOT at startup) ────────────
+def _run_pipeline():
+    _set(running=True, done=False, error=None, phase=0)
+    try:
+        # ── lazy imports so server boots even if deps are missing ──
+        # from Player_Track      import player_tracking   # noqa  ← SKIPPED (tracking already done)
+        from Movement_Features import features          # noqa
+        from Fatigue           import fatigue           # noqa
+        from goal_prob         import goal_prob         # noqa
+        from Match_Outcome     import Match_Outcome     # noqa
+
+        # _set(phase=1)
+        # player_tracking()   # ← SKIPPED — tracked_output.mp4 + 1_tracking.csv already exist
+
+        _set(phase=2)
+        features()
+
+        _set(phase=3)
+        fatigue()
+        goal_prob()
+
+        _set(phase=4)
+        Match_Outcome()
+
+        _set(done=True, running=False)
+
+    except Exception as exc:
+        _set(error=str(exc), running=False)
+
+
+# ── FastAPI app ────────────────────────────────────────────────────────────────
+app = FastAPI(title="MatchIQ API", version="1.0.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],          # open for local dev
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# ── Health check ───────────────────────────────────────────────────────────────
+@app.get("/")
+def health():
+    return {"status": "ok", "message": "MatchIQ API running"}
+
+
+# ── POST /upload ───────────────────────────────────────────────────────────────
+@app.post("/upload")
+async def upload_video(file: UploadFile = File(...)):
+    TEST_DATA_DIR.mkdir(exist_ok=True)
+    data = await file.read()
+    INPUT_VIDEO.write_bytes(data)
+    _set(phase=0, done=False, error=None, running=False)
+    return {"ok": True, "filename": file.filename, "bytes": len(data)}
+
+
+# ── POST /run ──────────────────────────────────────────────────────────────────
+@app.post("/run")
+def run_pipeline():
+    with _lock:
+        if _STATUS["running"]:
+            raise HTTPException(status_code=409, detail="Pipeline already running")
+        if not INPUT_VIDEO.exists():
+            raise HTTPException(status_code=400, detail="No video uploaded yet")
+    t = threading.Thread(target=_run_pipeline, daemon=True)
+    t.start()
+    return {"ok": True}
+
+
+# ── GET /status ────────────────────────────────────────────────────────────────
+@app.get("/status")
+def get_status():
+    with _lock:
+        return dict(_STATUS)
+
+
+# ── GET /results/fatigue ───────────────────────────────────────────────────────
+@app.get("/results/fatigue")
+def results_fatigue():
+    path = CSV_DIR / "1_fatigue_scores.csv"
+    if not path.exists():
+        return []
+    df = pd.read_csv(path).reset_index()
+    df["fatigue_score"] = (df["fatigue_score"] * 100).round(1)
+    records = []
+    for _, row in df.iterrows():
+        pid = row.get("player_id", row.get("index", "?"))
+        records.append({
+            "label": f"P{int(pid)}",
+            "score": float(row["fatigue_score"]),
+            "level": str(row.get("fatigue_level", "LOW")),
+            "team":  int(row["team_id"]) if pd.notna(row.get("team_id")) else -1,
+        })
+    return records
+
+
+# ── GET /results/goal-prob ─────────────────────────────────────────────────────
+@app.get("/results/goal-prob")
+def results_goal_prob():
+    path = CSV_DIR / "1_goal_predictions.csv"
+    if not path.exists():
+        return []
+    df = pd.read_csv(path)
+    frames = sorted(df["frame"].unique())
+    step   = max(1, len(frames) // 150)
+    result = []
+    for frame in frames[::step]:
+        fdf = df[df["frame"] == frame]
+        t0  = fdf[fdf["team_id"] == 0]["goal_probability"].max()
+        t1  = fdf[fdf["team_id"] == 1]["goal_probability"].max()
+        result.append({
+            "frame": int(frame),
+            "t0": round(float(t0) if pd.notna(t0) else 0.0, 3),
+            "t1": round(float(t1) if pd.notna(t1) else 0.0, 3),
+        })
+    return result
+
+
+# ── GET /results/outcome ───────────────────────────────────────────────────────
+@app.get("/results/outcome")
+def results_outcome():
+    path = CSV_DIR / "1_match_predictions.csv"
+    if not path.exists():
+        return {}
+    row = pd.read_csv(path).iloc[0].to_dict()
+
+    def pct(k): return round(float(row.get(k, 0)) * 100, 1)
+    def val(k): return round(float(row.get(k, 0)), 1)
+
+    return {
+        "winA":       pct("win_prob_team0"),
+        "draw":       pct("draw_prob"),
+        "winB":       pct("win_prob_team1"),
+        "possession": {"t0": val("possession_team0"), "t1": val("possession_team1")},
+        "shots":      {"t0": int(row.get("shots_team0", 0)), "t1": int(row.get("shots_team1", 0))},
+        "territory":  {"t0": val("territory_team0"),  "t1": val("territory_team1")},
+        "momentum":   {"t0": val("momentum_team0"),   "t1": val("momentum_team1")},
+    }
+
+
+# ── GET /results/tracking ──────────────────────────────────────────────────────
+@app.get("/results/tracking")
+def results_tracking():
+    path = CSV_DIR / "1_tracking.csv"
+    if not path.exists():
+        return []
+    df         = pd.read_csv(path)
+    last_frame = df["frame"].max()
+    records    = []
+    for _, row in df[df["frame"] == last_frame].iterrows():
+        px, py = _norm_pct(row.get("pitch_x"), row.get("pitch_y"))
+        if px is None:
+            raw_x = row.get("x", 960)
+            raw_y = row.get("y", 540)
+            px = round(float(raw_x) / 1920 * 100, 2) if pd.notna(raw_x) else 50.0
+            py = round(float(raw_y) / 1080 * 100, 2) if pd.notna(raw_y) else 50.0
+        records.append({
+            "id":   int(row["player_id"]),
+            "team": int(row["team_id"]) if pd.notna(row.get("team_id")) else -1,
+            "role": str(row["role"]),
+            "x":    px,
+            "y":    py,
+        })
+    return records
+
+
+# ── GET /video/tracked ─────────────────────────────────────────────────────────
+@app.get("/video/tracked")
+def video_tracked():
+    if not TRACKED_VIDEO.exists():
+        raise HTTPException(status_code=404, detail="Tracked video not ready yet")
+    return FileResponse(
+        str(TRACKED_VIDEO),
+        media_type="video/mp4",
+        headers={"Content-Disposition": "inline; filename=tracked_output.mp4"},
+    )
+
+
+# ── GET /download/csv ──────────────────────────────────────────────────────────
+@app.get("/download/csv")
+def download_csv():
+    csv_files = list(CSV_DIR.glob("*.csv"))
+    if not csv_files:
+        raise HTTPException(status_code=404, detail="No CSV files found yet")
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for f in csv_files:
+            zf.write(f, f.name)
+    buf.seek(0)
+    return StreamingResponse(
+        buf,
+        media_type="application/zip",
+        headers={"Content-Disposition": "attachment; filename=matchiq_data.zip"},
+    )
+
+
+# ── dev entry ──────────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)

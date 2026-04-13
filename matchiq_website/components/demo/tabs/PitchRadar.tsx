@@ -1,14 +1,16 @@
 "use client";
 
 import { PITCH_PLAYERS } from "@/lib/mockData";
+import type { TrackingRow } from "../DemoClient";
 
 const TEAM_COLORS: Record<number, string> = { 0: "#3b82f6", 1: "#f43f5e" };
+function playerColor(team: number) { return TEAM_COLORS[team] ?? "#facc15"; }
 
-function playerColor(team: number) {
-  return TEAM_COLORS[team] ?? "#facc15";
-}
+export default function PitchRadar({ data }: { data: TrackingRow[] | null }) {
+  /* Use real tracking data if available, else mock */
+  const players = data ?? PITCH_PLAYERS;
+  const isLive  = data !== null;
 
-export default function PitchRadar() {
   const W = 620, H = 380;
 
   return (
@@ -18,14 +20,17 @@ export default function PitchRadar() {
         <p style={{ fontSize: "0.7rem", textTransform: "uppercase", letterSpacing: "0.12em", color: "#D4AF37", fontWeight: 600, marginBottom: "0.25rem" }}>
           Pitch Radar
         </p>
-        <h3 style={{ fontSize: "1.1rem", fontWeight: 700 }}>Live Player Positions</h3>
+        <h3 style={{ fontSize: "1.1rem", fontWeight: 700 }}>
+          {isLive ? "Last Tracked Frame — Player Positions" : "Live Player Positions"}
+          {isLive && <span style={{ fontSize: "0.75rem", color: "#22c55e", marginLeft: "0.5rem", fontWeight: 400 }}>● Live Data</span>}
+        </h3>
       </div>
 
       {/* Legend */}
       <div style={{ display: "flex", gap: "1.5rem", marginBottom: "1.25rem", flexWrap: "wrap" }}>
         {[
-          { color: "#3b82f6", label: "Team 0" },
-          { color: "#f43f5e", label: "Team 1" },
+          { color: "#3b82f6", label: "Team 0"  },
+          { color: "#f43f5e", label: "Team 1"  },
           { color: "#facc15", label: "Referee" },
           { color: "#ffffff", label: "Ball"    },
         ].map(({ color, label }) => (
@@ -38,48 +43,35 @@ export default function PitchRadar() {
 
       {/* Pitch SVG */}
       <div style={{ width: "100%", overflowX: "auto" }}>
-        <svg
-          viewBox={`0 0 ${W} ${H}`}
-          style={{ maxWidth: "100%", display: "block", borderRadius: "0.75rem" }}
-          xmlns="http://www.w3.org/2000/svg"
-        >
-          {/* Pitch background */}
+        <svg viewBox={`0 0 ${W} ${H}`} style={{ maxWidth: "100%", display: "block", borderRadius: "0.75rem" }} xmlns="http://www.w3.org/2000/svg">
+          {/* Background */}
           <rect width={W} height={H} fill="#052e16" rx="8" />
 
           {/* Pitch markings */}
           <g stroke="#166534" strokeWidth="1.5" fill="none">
-            {/* Outer boundary */}
-            <rect x="30" y="20" width={W-60} height={H-40} rx="3" />
-            {/* Centre line */}
-            <line x1={W/2} y1="20" x2={W/2} y2={H-20} />
-            {/* Centre circle */}
-            <circle cx={W/2} cy={H/2} r="52" />
-            <circle cx={W/2} cy={H/2} r="3" fill="#166534" />
-            {/* Left penalty box */}
-            <rect x="30" y={H/2 - 70} width="100" height="140" />
-            {/* Left goal box */}
-            <rect x="30" y={H/2 - 30} width="40" height="60" />
-            {/* Left penalty spot */}
-            <circle cx="100" cy={H/2} r="3" fill="#166534" />
-            {/* Right penalty box */}
-            <rect x={W-130} y={H/2 - 70} width="100" height="140" />
-            {/* Right goal box */}
-            <rect x={W-70} y={H/2 - 30} width="40" height="60" />
-            {/* Right penalty spot */}
-            <circle cx={W-100} cy={H/2} r="3" fill="#166534" />
+            <rect x="30" y="20" width={W - 60} height={H - 40} rx="3" />
+            <line x1={W / 2} y1="20" x2={W / 2} y2={H - 20} />
+            <circle cx={W / 2} cy={H / 2} r="52" />
+            <circle cx={W / 2} cy={H / 2} r="3" fill="#166534" />
+            <rect x="30"       y={H / 2 - 70} width="100" height="140" />
+            <rect x="30"       y={H / 2 - 30} width="40"  height="60"  />
+            <circle cx="100" cy={H / 2} r="3" fill="#166534" />
+            <rect x={W - 130}  y={H / 2 - 70} width="100" height="140" />
+            <rect x={W - 70}   y={H / 2 - 30} width="40"  height="60"  />
+            <circle cx={W - 100} cy={H / 2} r="3" fill="#166534" />
           </g>
 
           {/* Players */}
-          {PITCH_PLAYERS.map(p => {
+          {players.map((p, idx) => {
+            /* x, y are 0-100 percentages */
             const cx = 30 + ((W - 60) * p.x) / 100;
             const cy = 20 + ((H - 40) * p.y) / 100;
 
             if (p.role === "ball") {
-              /* Ball — white diamond */
               return (
-                <g key={p.id}>
+                <g key={`ball-${idx}`}>
                   <polygon
-                    points={`${cx},${cy-8} ${cx+8},${cy} ${cx},${cy+8} ${cx-8},${cy}`}
+                    points={`${cx},${cy - 8} ${cx + 8},${cy} ${cx},${cy + 8} ${cx - 8},${cy}`}
                     fill="white"
                     filter="url(#ballGlow)"
                   />
@@ -87,24 +79,24 @@ export default function PitchRadar() {
               );
             }
 
+            if (p.role === "referee") {
+              return (
+                <g key={`ref-${idx}`}>
+                  <circle cx={cx} cy={cy} r="6" fill="#facc15" stroke="rgba(0,0,0,0.4)" strokeWidth="1.5" />
+                  <text x={cx} y={cy + 4} textAnchor="middle" fontSize="7" fontWeight="900" fill="#000">R</text>
+                </g>
+              );
+            }
+
             const color = playerColor(p.team);
+            const label = p.id > 0 ? String(p.id <= 11 ? p.id : p.id - 11) : "?";
+
             return (
-              <g key={p.id}>
-                {/* Glow ring */}
-                <circle cx={cx} cy={cy} r="10"
-                  fill={color} opacity={0.2} />
-                {/* Dot */}
-                <circle cx={cx} cy={cy} r="6.5"
-                  fill={color}
-                  stroke="rgba(0,0,0,0.5)"
-                  strokeWidth="1.5" />
-                {/* Player number */}
-                <text x={cx} y={cy + 4}
-                  textAnchor="middle"
-                  fontSize="7"
-                  fontWeight="900"
-                  fill="white">
-                  {p.id <= 11 ? p.id : p.id - 11}
+              <g key={`p-${p.id}-${idx}`}>
+                <circle cx={cx} cy={cy} r="10" fill={color} opacity={0.2} />
+                <circle cx={cx} cy={cy} r="6.5" fill={color} stroke="rgba(0,0,0,0.5)" strokeWidth="1.5" />
+                <text x={cx} y={cy + 4} textAnchor="middle" fontSize="7" fontWeight="900" fill="white">
+                  {label}
                 </text>
               </g>
             );
@@ -121,7 +113,9 @@ export default function PitchRadar() {
       </div>
 
       <p style={{ fontSize: "0.75rem", color: "#444", marginTop: "0.75rem", textAlign: "center" }}>
-        Positions captured at frame 80 — peak danger moment for Team 0
+        {isLive
+          ? `${players.filter(p => p.role === "player").length} players tracked · ${players.filter(p => p.team === 0).length} Team 0 · ${players.filter(p => p.team === 1).length} Team 1`
+          : "Positions captured at frame 80 — peak danger moment for Team 0"}
       </p>
     </div>
   );
