@@ -47,7 +47,7 @@ import pandas as pd
 # === YOUR VIDEO === SET ACCORDINGLY TO YOUR LOCAL SETUP
 SOURCE_VIDEO_PATH = "Test_Data/Testing.mp4"
 OUTPUT_VIDEO_PATH = "Test_Data/tracked_output.mp4"
-OUTPUT_CSV_PATH   = "Math_Data_CSV/1_tracking.csv"
+OUTPUT_CSV_PATH   = "Match_Data_CSV/1_tracking.csv"
 
 # === YOUR MODEL'S CLASS IDs (confirmed from Cell 7 output) ===
 BALL_ID       = 1
@@ -256,7 +256,7 @@ def process_all_frames(PLAYER_DETECTION_MODEL, FIELD_DETECTION_MODEL, CONFIG, te
     video_info = sv.VideoInfo.from_video_path(SOURCE_VIDEO_PATH)
     out = cv2.VideoWriter(
         OUTPUT_VIDEO_PATH,
-        cv2.VideoWriter_fourcc(*"mp4v"),
+        cv2.VideoWriter_fourcc(*"avc1"),
         video_info.fps,
         (video_info.width, video_info.height)
     )

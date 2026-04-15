@@ -10,11 +10,13 @@ Then open: http://localhost:3000/demo
 
 import io
 import os
+import queue
 import sys
 import threading
 import zipfile
 from pathlib import Path
 
+import cv2
 import pandas as pd
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -32,6 +34,10 @@ TRACKED_VIDEO = TEST_DATA_DIR / "tracked_output.mp4"
 os.chdir(PROJECT_ROOT)
 sys.path.insert(0, str(PIPELINE_DIR))
 
+# Load API keys from Pipeline/.env  (ROBOFLOW_API_KEY, HF_TOKEN, etc.)
+from dotenv import load_dotenv          # noqa: E402
+load_dotenv(PIPELINE_DIR / ".env")
+
 # ── Pitch coordinate normalisation ─────────────────────────────────────────────
 _PX_MIN, _PX_MAX = 1405.4, 11780.6
 _PY_MIN, _PY_MAX = 46.9,   7082.8
@@ -42,15 +48,79 @@ def _norm_pct(px, py):
         px, py = float(px), float(py)
     except (TypeError, ValueError):
         return None, None
-    if 0 <= px <= 105 and 0 <= py <= 68:          # already in metres
+    if 0 <= px <= 105 and 0 <= py <= 68:
         return round(px / 105 * 100, 2), round(py / 68 * 100, 2)
     x = (px - _PX_MIN) / (_PX_MAX - _PX_MIN) * 100
     y = (py - _PY_MIN) / (_PY_MAX - _PY_MIN) * 100
     return round(max(0.0, min(100.0, x)), 2), round(max(0.0, min(100.0, y)), 2)
 
 
+# ── Frame streaming queue ──────────────────────────────────────────────────────
+# Each element is raw JPEG bytes; None is the end-of-stream sentinel.
+_frame_queue: queue.Queue = queue.Queue(maxsize=60)
+_orig_video_writer = None          # saved reference during cv2 patch
+
+
+class _StreamingVideoWriter:
+    """Wraps cv2.VideoWriter so every written frame is also pushed to the
+    MJPEG queue for live browser preview."""
+
+    def __init__(self, *args, **kwargs):
+        self._w = _orig_video_writer(*args, **kwargs)
+
+    def write(self, frame):
+        self._w.write(frame)
+        ok, jpg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 60])
+        if ok:
+            try:
+                _frame_queue.put_nowait(jpg.tobytes())
+            except queue.Full:
+                pass   # drop frame — consumer is too slow
+
+    def release(self):
+        self._w.release()
+
+    def isOpened(self):
+        return self._w.isOpened()
+
+    def __getattr__(self, name):
+        return getattr(self._w, name)
+
+
+def _run_tracking_with_stream():
+    """Calls player_tracking() while streaming each annotated frame via MJPEG.
+    Patches cv2.VideoWriter at the module level so Player_Track.py intercepts it
+    without any modification to that file."""
+    global _orig_video_writer
+    from Player_Track import player_tracking  # noqa: PLC0415
+
+    # Clear any stale frames from a previous run
+    while not _frame_queue.empty():
+        try:
+            _frame_queue.get_nowait()
+        except queue.Empty:
+            break
+
+    _set(streaming=True)
+    _orig_video_writer = cv2.VideoWriter
+    cv2.VideoWriter = _StreamingVideoWriter
+    try:
+        player_tracking()
+    finally:
+        cv2.VideoWriter = _orig_video_writer
+        _orig_video_writer = None
+        _frame_queue.put(None)          # end-of-stream sentinel
+        _set(streaming=False)
+
+
 # ── Shared pipeline status ─────────────────────────────────────────────────────
-_STATUS: dict = {"phase": 0, "done": False, "error": None, "running": False}
+_STATUS: dict = {
+    "phase":     0,
+    "done":      False,
+    "error":     None,
+    "running":   False,
+    "streaming": False,   # True only while MJPEG frames are being pushed
+}
 _lock = threading.Lock()
 
 
@@ -59,34 +129,36 @@ def _set(**kw):
         _STATUS.update(kw)
 
 
-# ── Background pipeline runner (imports happen here, NOT at startup) ────────────
+# ── Background pipeline runner ─────────────────────────────────────────────────
 def _run_pipeline():
-    _set(running=True, done=False, error=None, phase=0)
+    _set(running=True, done=False, error=None, phase=0, streaming=False)
     try:
-        # ── lazy imports so server boots even if deps are missing ──
-        # from Player_Track      import player_tracking   # noqa  ← SKIPPED (tracking already done)
-        from Movement_Features import features          # noqa
-        from Fatigue           import fatigue           # noqa
-        from goal_prob         import goal_prob         # noqa
-        from Match_Outcome     import Match_Outcome     # noqa
+        from Movement_Features import features      # noqa
+        from Fatigue           import fatigue       # noqa
+        from goal_prob         import goal_prob     # noqa
+        from Match_Outcome     import Match_Outcome # noqa
 
-        # _set(phase=1)
-        # player_tracking()   # ← SKIPPED — tracked_output.mp4 + 1_tracking.csv already exist
+        # ── Phase 1: Player tracking — skipped for testing (existing CSVs used) ──
+        _set(phase=1)
+        _run_tracking_with_stream()
 
+        # ── Phase 2: Movement features ────────────────────────────────────────
         _set(phase=2)
         features()
 
+        # ── Phase 3: Fatigue + goal probability ───────────────────────────────
         _set(phase=3)
         fatigue()
         goal_prob()
 
+        # ── Phase 4: Match outcome ────────────────────────────────────────────
         _set(phase=4)
         Match_Outcome()
 
         _set(done=True, running=False)
 
     except Exception as exc:
-        _set(error=str(exc), running=False)
+        _set(error=str(exc), running=False, streaming=False)
 
 
 # ── FastAPI app ────────────────────────────────────────────────────────────────
@@ -94,14 +166,13 @@ app = FastAPI(title="MatchIQ API", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],          # open for local dev
-    allow_credentials=True,
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
-# ── Health check ───────────────────────────────────────────────────────────────
+# ── GET / — health ─────────────────────────────────────────────────────────────
 @app.get("/")
 def health():
     return {"status": "ok", "message": "MatchIQ API running"}
@@ -113,7 +184,7 @@ async def upload_video(file: UploadFile = File(...)):
     TEST_DATA_DIR.mkdir(exist_ok=True)
     data = await file.read()
     INPUT_VIDEO.write_bytes(data)
-    _set(phase=0, done=False, error=None, running=False)
+    _set(phase=0, done=False, error=None, running=False, streaming=False)
     return {"ok": True, "filename": file.filename, "bytes": len(data)}
 
 
@@ -135,6 +206,40 @@ def run_pipeline():
 def get_status():
     with _lock:
         return dict(_STATUS)
+
+
+# ── GET /stream/frames — live MJPEG during tracking ───────────────────────────
+@app.get("/stream/frames")
+def stream_frames():
+    """Returns a multipart/x-mixed-replace MJPEG stream.
+    Browser <img> tags natively render this as a live video feed."""
+
+    def generate():
+        while True:
+            try:
+                frame_bytes = _frame_queue.get(timeout=5.0)
+            except queue.Empty:
+                # Still waiting — check if we should give up
+                with _lock:
+                    if not _STATUS["streaming"]:
+                        break
+                continue
+
+            if frame_bytes is None:    # end-of-stream sentinel
+                break
+
+            yield (
+                b"--frame\r\n"
+                b"Content-Type: image/jpeg\r\n\r\n"
+                + frame_bytes
+                + b"\r\n"
+            )
+
+    return StreamingResponse(
+        generate(),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 # ── GET /results/fatigue ───────────────────────────────────────────────────────
@@ -163,7 +268,7 @@ def results_goal_prob():
     path = CSV_DIR / "1_goal_predictions.csv"
     if not path.exists():
         return []
-    df = pd.read_csv(path)
+    df     = pd.read_csv(path)
     frames = sorted(df["frame"].unique())
     step   = max(1, len(frames) // 150)
     result = []

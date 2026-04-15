@@ -9,6 +9,7 @@ import FatigueChart from "./tabs/FatigueChart";
 import GoalProbChart from "./tabs/GoalProbChart";
 import MatchOutcomeChart from "./tabs/MatchOutcomeChart";
 import PitchRadar from "./tabs/PitchRadar";
+import VideoTab from "./tabs/VideoTab";
 
 const API = "http://localhost:8000";
 
@@ -167,42 +168,6 @@ function UploadPanel({
   );
 }
 
-/* ── Video Tab ────────────────────────────────────────────────────────────── */
-function VideoTab({ done }: { done: boolean }) {
-  if (done) {
-    return (
-      <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
-        <video
-          src={`${API}/video/tracked`}
-          controls
-          style={{ width: "100%", borderRadius: "0.75rem", border: "1px solid #2a2a2a", background: "#000", maxHeight: "420px" }}
-        />
-        <p style={{ fontSize: "0.75rem", color: "#555", textAlign: "center" }}>
-          Player bounding boxes · Team colour labels · Ball tracking
-        </p>
-      </div>
-    );
-  }
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
-      <div style={{ position: "relative", background: "#050505", borderRadius: "0.75rem", overflow: "hidden", aspectRatio: "16/9", display: "flex", alignItems: "center", justifyContent: "center", border: "1px solid #2a2a2a" }}>
-        <svg viewBox="0 0 640 360" width="100%" height="100%" style={{ opacity: 0.12 }}>
-          <rect x="20" y="20" width="600" height="320" rx="3" fill="none" stroke="#22c55e" strokeWidth="2" />
-          <line x1="320" y1="20" x2="320" y2="340" stroke="#22c55e" strokeWidth="1" />
-          <circle cx="320" cy="180" r="50" fill="none" stroke="#22c55e" strokeWidth="1" />
-          <rect x="20" y="115" width="90" height="130" fill="none" stroke="#22c55e" strokeWidth="1" />
-          <rect x="530" y="115" width="90" height="130" fill="none" stroke="#22c55e" strokeWidth="1" />
-        </svg>
-        <div style={{ position: "absolute", textAlign: "center" }}>
-          <div style={{ fontSize: "3rem", marginBottom: "0.5rem" }}>⚽</div>
-          <p style={{ fontSize: "0.85rem", color: "#888" }}>Tracked video preview</p>
-          <p style={{ fontSize: "0.75rem", color: "#555", marginTop: "0.25rem" }}>Run the pipeline to see real output</p>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 /* ── Main Demo Client ─────────────────────────────────────────────────────── */
 export default function DemoClient() {
   const [stage, setStage] = useState<Stage>("idle");
@@ -216,6 +181,8 @@ export default function DemoClient() {
   const [goalProbData, setGoalProbData] = useState<GoalProbRow[] | null>(null);
   const [outcomeData, setOutcomeData] = useState<OutcomeData | null>(null);
   const [trackingData, setTrackingData] = useState<TrackingRow[] | null>(null);
+  const [isStreaming, setIsStreaming] = useState(false);  // true while MJPEG frames are live
+  const [serverPhase, setServerPhase] = useState(0);
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -254,7 +221,8 @@ export default function DemoClient() {
            done                        → 4 steps done  */
         const phaseToSteps: Record<number, number> = { 0: 1, 1: 1, 2: 2, 3: 3, 4: 3 };
         setDoneSteps(data.done ? 4 : (phaseToSteps[data.phase] ?? 1));
-
+        setIsStreaming(data.streaming ?? false);
+        setServerPhase(data.phase ?? 0);
         if (data.error) {
           clearInterval(pollRef.current!);
           setErrorMsg(data.error);
@@ -366,7 +334,7 @@ export default function DemoClient() {
                 <motion.div key={activeTab}
                   initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0, y: -8 }} transition={{ duration: 0.2 }}>
-                  {activeTab === "video" && <VideoTab done={stage === "done"} />}
+                  {activeTab === "video" && <VideoTab done={stage === "done"} isStreaming={isStreaming} phase={serverPhase} />}
                   {activeTab === "fatigue" && <FatigueChart data={fatigueData} />}
                   {activeTab === "goal" && <GoalProbChart data={goalProbData} />}
                   {activeTab === "outcome" && <MatchOutcomeChart data={outcomeData} />}
