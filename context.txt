@@ -1,0 +1,398 @@
+# MatchIQ — Master Project Context Prompt
+# Use this file to instantly brief any AI agent on the full project.
+# ============================================================
+
+
+## PROJECT OVERVIEW
+
+MatchIQ is a Final Year Project (FYP) — an AI-powered football (soccer) match analytics
+platform. It ingests a raw match video, runs a multi-stage computer vision pipeline to
+track players and the ball, computes movement metrics, fatigue scores, goal probabilities,
+and match outcome predictions, then serves all results through a FastAPI backend and a
+Next.js web dashboard.
+
+The system operates in two modes:
+- **Batch** (main.py): processes the entire video offline, writes CSVs.
+- **Live/API** (api_server.py): accepts video upload, runs pipeline in a background thread,
+  streams annotated frames via MJPEG to the frontend, and exposes REST endpoints for results.
+
+
+## PROBLEM STATEMENT
+
+Professional football analytics tools (Opta, StatsBomb, etc.) are prohibitively expensive
+and unavailable to lower-league clubs, academies, and grassroots teams — particularly in
+Pakistan and other developing markets. MatchIQ provides affordable, automated match
+analysis from a single video file, requiring no specialised hardware beyond a consumer GPU.
+
+
+## SYSTEM ARCHITECTURE
+
+```
+Raw Video (MP4)
+      │
+      ▼
+┌─────────────────────────────────────────────────────┐
+│              FastAPI Backend  (api_server.py)        │
+│                                                      │
+│  POST /upload  →  saves to Test_Data/Testing.mp4    │
+│  POST /run     →  launches _run_pipeline() thread   │
+│  GET  /status  →  phase, done, error, streaming     │
+│  GET  /stream/frames  →  MJPEG live preview         │
+│  GET  /results/fatigue|goal-prob|outcome|tracking   │
+│  GET  /video/tracked   →  final annotated MP4       │
+│  GET  /download/csv    →  ZIP of all output CSVs    │
+│                                                      │
+│  Pipeline stages (sequential, same thread):          │
+│   Phase 1 → Player_Track.py   (player_tracking())   │
+│   Phase 2 → Movement_Features.py (features())       │
+│   Phase 3 → Fatigue.py (fatigue())                  │
+│             goal_prob.py (goal_prob())               │
+│   Phase 4 → Match_Outcome.py (Match_Outcome())      │
+└─────────────────────────────────────────────────────┘
+      │                          │
+      ▼                          ▼
+ Match_Data_CSV/          Test_Data/
+ 1_tracking.csv           tracked_output.mp4
+ 1_Movement_Features.csv  (H.264 faststart, browser-ready)
+ 1_fatigue_scores.csv
+ 1_goal_predictions.csv
+ 1_match_predictions.csv
+      │
+      ▼
+┌──────────────────────────────────────────────────────┐
+│           Next.js Frontend  (matchiq_website/)        │
+│                                                       │
+│  /demo page — upload, run, live stream, results tabs  │
+│    tabs: Video | Fatigue | Goal Prob | Outcome        │
+│  /analytics page — static chart explorer             │
+│  /dashboard, /compare, /about, /gallery, /contact    │
+└──────────────────────────────────────────────────────┘
+```
+
+
+## PIPELINE — DETAILED STAGE-BY-STAGE EXPLANATION
+
+### Phase 1 — Player Tracking  (Player_Track.py)
+
+**Models:**
+- `football-vgiqa-3njno/2`  (Roboflow YOLOv8) — detects Ball, Goalkeeper, Player, Referee
+- `football-field-detection-f07vi/14` (Roboflow YOLOv8) — detects 32 pitch keypoints
+
+**Process per frame:**
+1. Run player detection model (confidence threshold 0.3).
+2. Separate ball detections; pad bounding boxes by 10 px.
+3. Run NMS on player detections (threshold 0.5).
+4. Track with `supervision.ByteTrack`
+   (activation=0.5, lost_buffer=30, min_match=0.7, fps=25).
+5. Split detections by class: players, goalkeepers, referees.
+6. Classify player teams using `sports.common.team.TeamClassifier`
+   (SiglipEncoder crops → KMeans, bootstrapped over first 100+ frames).
+7. Assign goalkeeper team by nearest-player proximity.
+8. Referees assigned class_id = -1.
+9. Run field detection model → estimate homography →
+   `sports.common.view.ViewTransformer` maps pixel coords to pitch coords (0–105 m × 0–68 m).
+10. Annotate frame: ellipse per player (team colour), triangle on ball, player ID labels.
+11. Write annotated frame to `tracked_output_raw.mp4` via `cv2.VideoWriter` (mp4v codec).
+12. Record per-frame CSV row: frame, player_id, x, y, pitch_x, pitch_y, team_id, role, confidence.
+
+**After all frames:**
+- `out.release()` finalises the mp4v file.
+- PyAV re-muxes `tracked_output_raw.mp4` → `tracked_output.mp4` as H.264 with
+  `movflags=faststart` (moov atom at front) so browsers can seek without buffering.
+- Deletes the raw temp file.
+- Writes `Match_Data_CSV/1_tracking.csv`.
+
+**MJPEG streaming (api_server.py patch):**
+`api_server.py` patches `cv2.VideoWriter` with `_StreamingVideoWriter` at runtime.
+Every frame written is also JPEG-encoded (quality 60) and pushed to `_frame_queue`
+(maxsize=60, drops on full). The `/stream/frames` endpoint reads from this queue
+and emits `multipart/x-mixed-replace` MJPEG. The patch is active only during Phase 1;
+a `None` sentinel signals end-of-stream.
+
+**Output:** `Match_Data_CSV/1_tracking.csv`
+Columns: frame, player_id, team_id, role, x, y, pitch_x, pitch_y, confidence
+
+---
+
+### Phase 2 — Movement Features  (Movement_Features.py)
+
+**Input:** `1_tracking.csv`
+
+Per player per frame:
+- **Distance**: Euclidean distance from previous position (pixels).
+- **Speed**: `distance × fps`, capped at 200 px/s.
+- **Acceleration**: Δspeed between consecutive frames.
+- **Sprint flag**: speed > 75th percentile of that player's rolling speed history.
+
+**Output:** `Match_Data_CSV/1_Movement_Features.csv`
+Columns: frame, player_id, distance, speed, acceleration, is_sprint
+
+---
+
+### Phase 3a — Fatigue Scoring  (Fatigue.py)
+
+**Input:** `1_Movement_Features.csv`
+
+Algorithm (per player):
+- Baseline established over first ~30 frames (EMA α=0.2).
+- `speed_drop    = max(0, (baseline_speed - current_ema_speed) / baseline_speed)`
+- `accel_drop    = max(0, (baseline_accel - current_ema_accel) / baseline_accel)`
+- `sprint_drop   = max(0, (baseline_sprint_rate - current_sprint_rate) / baseline_sprint_rate)`
+- `fatigue_score = 0.4×speed_drop + 0.3×accel_drop + 0.3×sprint_drop`
+- Levels: HIGH ≥ 0.7 | MEDIUM ≥ 0.4 | LOW < 0.4
+
+**Output:** `Match_Data_CSV/1_fatigue_scores.csv`
+Columns: player_id, team_id, fatigue_score, fatigue_level, speed_drop, accel_drop, sprint_drop
+
+---
+
+### Phase 3b — Goal Probability  (goal_prob.py)
+
+**Inputs:** `1_tracking.csv`, `1_Movement_Features.csv`
+
+Per player per frame (pitch coordinates):
+- `distance_to_goal`: nearest goal centre (0,34) or (105,34); factor = max(0, 1 − dist/35).
+- `angle_to_goal`: angle subtended by goal posts; factor = min(angle/45°, 1.0).
+- `speed_factor`: min(speed/150, 1.0).
+- `defender_factor`: min(nearest_opponent_dist/5m, 1.0).
+- `goal_probability = 0.40×dist + 0.30×angle + 0.15×speed + 0.15×defender`
+
+**Output:** `Match_Data_CSV/1_goal_predictions.csv`
+Columns: frame, player_id, team_id, distance_to_goal, angle_to_goal, goal_probability
+
+---
+
+### Phase 4 — Match Outcome  (Match_Outcome.py)
+
+**Inputs:** all four CSVs above.
+
+Metrics (per team):
+- **Possession**: % of frames where team is closest to ball.
+- **Territory**: % of frames team spends in attacking half (Team 0: pitch_x > 52.5, Team 1: < 52.5).
+- **Shots**: frames where goal_probability ≥ 0.65.
+- **Danger**: mean goal probability.
+- **Momentum**: mean speed in last 20% of match frames.
+
+Win probability:
+- `strength = 0.25×shots + 0.25×danger + 0.20×possession + 0.15×territory + 0.15×momentum`
+- Sigmoid applied to (strength_0 − strength_1), then normalised to win0 + draw + win1 = 100%.
+
+**Output:** `Match_Data_CSV/1_match_predictions.csv`
+
+
+## TECHNOLOGIES
+
+| Layer | Technology |
+|---|---|
+| Player detection | Roboflow `inference-gpu==1.2.1`, YOLOv8 models |
+| Object tracking | `supervision==0.27.0.post2` ByteTrack |
+| Team classification | `sports` (Roboflow git) — SiglipEncoder + KMeans |
+| Pitch homography | `sports` ViewTransformer + SoccerPitchConfiguration |
+| Deep learning | `torch==2.5.1+cu121`, `torchvision==0.20.1+cu121` |
+| Video I/O | `opencv-contrib-python==4.10.0.84`, `av==14.2.0` (PyAV) |
+| Data processing | `pandas==2.3.3`, `numpy==1.26.4`, `scipy==1.17.1` |
+| Backend API | `fastapi==0.115.14`, `uvicorn==0.44.0` |
+| Frontend | Next.js (latest breaking-changes version), React, TypeScript |
+| GPU runtime | NVIDIA GeForce GTX 1660 Super (6 GB), CUDA 12.1 |
+| Environment | WSL2 (Ubuntu), Python 3.12, venv at `/mnt/d/MatchIQ/venv/` |
+
+
+## FILE / FOLDER STRUCTURE
+
+```
+/mnt/d/MatchIQ/
+├── .env                        # ROBOFLOW_API_KEY, HF_TOKEN
+├── .model_cache/               # Roboflow model weights (auto-downloaded)
+├── requirements2.txt           # Pinned dependencies (GPU + CPU sections)
+├── context.txt                 # This file
+├── setup.sh
+│
+├── Pipeline/
+│   ├── api_server.py           # FastAPI app + MJPEG streaming patch
+│   ├── Player_Track.py         # Phase 1 — detection, tracking, annotation
+│   ├── Movement_Features.py    # Phase 2 — speed, distance, sprint
+│   ├── Fatigue.py              # Phase 3a — fatigue scoring
+│   ├── goal_prob.py            # Phase 3b — goal probability
+│   ├── Match_Outcome.py        # Phase 4 — match outcome prediction
+│   ├── frame_pipeline.py       # Single-frame orchestrator (batch mode)
+│   └── main.py                 # Batch entry point
+│
+├── Test_Data/
+│   ├── Testing.mp4             # Input video (uploaded via /upload endpoint)
+│   ├── tracked_output_raw.mp4  # Intermediate mp4v (temp, deleted after remux)
+│   └── tracked_output.mp4      # Final H.264 faststart output (served at /video/tracked)
+│
+├── Match_Data_CSV/
+│   ├── 1_tracking.csv
+│   ├── 1_Movement_Features.csv
+│   ├── 1_fatigue_scores.csv
+│   ├── 1_goal_predictions.csv
+│   └── 1_match_predictions.csv
+│
+├── matchiq_website/            # Next.js frontend
+│   ├── app/
+│   │   ├── page.tsx            # Home
+│   │   ├── demo/               # Main demo page
+│   │   ├── analytics/
+│   │   ├── dashboard/
+│   │   ├── compare/
+│   │   ├── about/
+│   │   ├── gallery/
+│   │   └── contact/
+│   └── components/
+│       ├── demo/
+│       │   ├── DemoClient.tsx  # Upload, poll /status, tabs orchestration
+│       │   └── tabs/
+│       │       ├── VideoTab.tsx         # Live MJPEG canvas + custom post-video player
+│       │       ├── FatigueChart.tsx
+│       │       ├── GoalProbChart.tsx
+│       │       ├── MatchOutcomeChart.tsx
+│       │       └── PitchRadar.tsx
+│       └── analytics/
+│           └── AnalyticsClient.tsx
+│
+└── venv/                       # Python virtual environment
+```
+
+
+## DATA FLOW
+
+```
+User uploads MP4
+        │
+POST /upload → saves as Test_Data/Testing.mp4
+        │
+POST /run → launches _run_pipeline() in background thread
+        │
+Phase 1: Player_Track.py
+  ├── reads  Test_Data/Testing.mp4
+  ├── writes Test_Data/tracked_output_raw.mp4  (mp4v via cv2.VideoWriter)
+  │          └── _StreamingVideoWriter intercepts each frame → _frame_queue
+  │                   └── GET /stream/frames sends MJPEG to browser canvas
+  ├── PyAV remux → Test_Data/tracked_output.mp4  (H.264 faststart)
+  └── writes Match_Data_CSV/1_tracking.csv
+        │
+Phase 2: Movement_Features.py
+  ├── reads  1_tracking.csv
+  └── writes 1_Movement_Features.csv
+        │
+Phase 3: Fatigue.py + goal_prob.py
+  ├── reads  1_tracking.csv, 1_Movement_Features.csv
+  └── writes 1_fatigue_scores.csv, 1_goal_predictions.csv
+        │
+Phase 4: Match_Outcome.py
+  ├── reads  all four CSVs
+  └── writes 1_match_predictions.csv
+        │
+_set(done=True)  →  frontend polls /status, detects done
+        │
+Frontend fetches:
+  GET /results/fatigue    → JSON for FatigueChart
+  GET /results/goal-prob  → JSON for GoalProbChart
+  GET /results/outcome    → JSON for MatchOutcomeChart
+  GET /results/tracking   → JSON for PitchRadar (last frame positions)
+  GET /video/tracked      → H.264 MP4 file for custom video player
+```
+
+
+## KEY FEATURES
+
+- **Live MJPEG stream** during Phase 1: frontend parses multipart stream via Fetch API,
+  extracts JPEG frames (SOI/EOI markers), renders on `<canvas>` with scrubbing controls.
+- **Custom video player** (post-pipeline): play/pause, seek bar with timestamps,
+  speed (0.25×–2×), ±10s skip buttons, fullscreen.
+- **Team colour classification** using unsupervised clustering on player jersey crops —
+  no pre-labelled data required.
+- **Pitch coordinate normalisation**: pixel detections mapped to real-world metres
+  (0–105 × 0–68) via homographic projection.
+- **Full CSV download**: ZIP of all five output CSVs.
+- **Zero-config GPU/CPU fallback**: ONNXRuntime and PyTorch both fall back to CPU
+  if CUDA is unavailable.
+
+
+## KNOWN ISSUES & CONSTRAINTS
+
+### CUDA / cuDNN initialisation (WSL2-specific)
+- **System** `libcudart.so.12` is version 12.0 (stale); cuDNN 9.1 needs 12.1+.
+- **Fix**: `api_server.py` top-of-file block uses `ctypes.RTLD_GLOBAL` to preload
+  the venv's `libcudart.so.12` (12.1) and then `libcudnn.so.9` before any import,
+  so ONNXRuntime finds the correct runtime.
+- Packages must be pinned: `nvidia-cuda-runtime-cu12==12.1.105`,
+  `nvidia-cudnn-cu12==9.1.0.70`, `onnxruntime-gpu==1.21.1`.
+
+### Video codec
+- `avc1` (H.264) codec is **not available** in this OpenCV build.
+- Pipeline writes `mp4v` (MPEG-4 Part 2) to a temp file, then PyAV re-muxes to
+  H.264 faststart for browser compatibility.
+- If PyAV remux fails, the raw mp4v file is renamed to the final path as fallback.
+
+### numpy version conflict
+- `inference-gpu==1.2.1` declares `numpy>=2.0.0` but the environment runs `1.26.4`.
+- This is a known soft conflict; the pipeline functions correctly with 1.26.4.
+
+### VideoWriter streaming patch
+- `api_server.py` replaces `cv2.VideoWriter` with `_StreamingVideoWriter` at runtime
+  (module-level monkey-patch). This must remain in place — any refactor that removes
+  `cv2.VideoWriter` from `Player_Track.py` will break the live MJPEG stream.
+
+### MJPEG frame queue
+- Queue maxsize = 60 frames. If the browser consumer is slow, frames are silently
+  dropped (`queue.Full` exception caught and ignored).
+
+### Single-video limitation
+- The system processes one video at a time. Concurrent pipeline runs are not supported.
+- Input video is always saved as `Test_Data/Testing.mp4` (overwritten on each upload).
+
+
+## API REFERENCE
+
+| Method | Endpoint | Description |
+|---|---|---|
+| POST | `/upload` | Upload MP4; saves to Test_Data/Testing.mp4 |
+| POST | `/run` | Start pipeline in background thread |
+| GET | `/status` | `{phase, done, error, running, streaming}` |
+| GET | `/stream/frames` | MJPEG stream (multipart/x-mixed-replace) |
+| GET | `/results/fatigue` | Fatigue scores JSON |
+| GET | `/results/goal-prob` | Goal probability over time JSON |
+| GET | `/results/outcome` | Match outcome predictions JSON |
+| GET | `/results/tracking` | Last-frame player positions JSON |
+| GET | `/video/tracked` | Final annotated H.264 MP4 (supports Range requests) |
+| GET | `/download/csv` | ZIP archive of all output CSVs |
+
+Backend runs on `http://localhost:8000`.
+Frontend runs on `http://localhost:3000`.
+
+Start backend (from Pipeline/ folder):
+```
+source ../venv/bin/activate
+uvicorn api_server:app --reload --port 8000
+```
+
+Start frontend (from matchiq_website/ folder):
+```
+npm run dev
+```
+
+
+## EXPECTED OUTPUTS
+
+| Output | Path | Format |
+|---|---|---|
+| Annotated video | Test_Data/tracked_output.mp4 | H.264 MP4, faststart |
+| Tracking data | Match_Data_CSV/1_tracking.csv | CSV |
+| Movement features | Match_Data_CSV/1_Movement_Features.csv | CSV |
+| Fatigue scores | Match_Data_CSV/1_fatigue_scores.csv | CSV |
+| Goal predictions | Match_Data_CSV/1_goal_predictions.csv | CSV |
+| Match predictions | Match_Data_CSV/1_match_predictions.csv | CSV |
+
+
+## ASSUMPTIONS & LIMITATIONS
+
+- Input video must be a single continuous match clip (not broadcast with cuts).
+- Camera must be relatively static (wide-angle, elevated view) for homography to work.
+- Team classification assumes exactly 2 teams with visually distinct jersey colours.
+- Goal probability formula is heuristic (weighted linear combination), not a trained model.
+- Fatigue scoring uses relative performance drop, not absolute physiological data.
+- The field detection model must detect enough keypoints to establish homography;
+  if it fails, pitch_x/pitch_y are None and all pitch-coordinate features are skipped.
+- Player IDs are ByteTrack-local (per-video, not cross-match persistent).

@@ -152,9 +152,9 @@ def calculate_match_outcome(possession, shots, territory, momentum, avg_danger):
 
 
 def Match_Outcome():
-    tracking_df    = pd.read_csv('Math_Data_CSV/1_tracking.csv')
-    goal_prob_df   = pd.read_csv('Math_Data_CSV/4_goal_predictions.csv')
-    movement_df    = pd.read_csv('Math_Data_CSV/2_Movement_Features.csv')
+    tracking_df    = pd.read_csv('Match_Data_CSV/1_tracking.csv')
+    goal_prob_df   = pd.read_csv('Match_Data_CSV/1_goal_predictions.csv')
+    movement_df    = pd.read_csv('Match_Data_CSV/1_Movement_Features.csv')
 
     #Possession
     ball_df    = tracking_df[tracking_df['role'] == 'ball'][['frame','x','y']].rename(columns={'x':'ball_x','y':'ball_y'})
@@ -269,7 +269,7 @@ def Match_Outcome():
     }
 
     outcome_df = pd.DataFrame([match_outcome])
-    outcome_df.to_csv('Math_Data_CSV/1_match_predictions.csv', index=False)
+    outcome_df.to_csv('Match_Data_CSV/1_match_predictions.csv', index=False)
 
 
 

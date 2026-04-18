@@ -191,8 +191,8 @@ def get_frame_goal_probabilities(detections, movement_by_player):
 
 
 def goal_prob():
-    tracking_df = pd.read_csv('Math_Data_CSV/1_tracking.csv')
-    movement_df = pd.read_csv('Math_Data_CSV/2_Movement_Features.csv')
+    tracking_df = pd.read_csv('Match_Data_CSV/1_tracking.csv')
+    movement_df = pd.read_csv('Match_Data_CSV/1_Movement_Features.csv')
 
 
     # Merge speed into tracking data
@@ -281,6 +281,6 @@ def goal_prob():
         'goal_probability'
     ]].copy()
 
-    goal_prob_df.to_csv('Math_Data_CSV/1_goal_predictions.csv', index=False)
+    goal_prob_df.to_csv('Match_Data_CSV/1_goal_predictions.csv', index=False)
     
     return 

@@ -13,8 +13,8 @@ import {
 } from "@/lib/mockData";
 
 /* ── palette ─────────────────────────────────────────────── */
-const T0  = "#3b82f6";
-const T1  = "#f43f5e";
+const T0 = "#3b82f6";
+const T1 = "#f43f5e";
 const GOLD = "#D4AF37";
 
 /* ── Stat row in the comparison table ─────────────────────── */
@@ -25,8 +25,8 @@ function StatRow({
 }) {
   const t0Wins = higherBetter ? v0 > v1 : v0 < v1;
   const t1Wins = higherBetter ? v1 > v0 : v1 < v0;
-  const pct0   = Math.round((v0 / (v0 + v1)) * 100);
-  const pct1   = 100 - pct0;
+  const pct0 = Math.round((v0 / (v0 + v1)) * 100);
+  const pct1 = 100 - pct0;
 
   return (
     <div style={{ display: "grid", gridTemplateColumns: "1fr auto 1fr", gap: "1rem", alignItems: "center", padding: "0.9rem 0", borderBottom: "1px solid #1a1a1a" }}>
@@ -62,9 +62,9 @@ function StatRow({
 
 /* ── Team header card ─────────────────────────────────────── */
 function TeamHeader({ team, stats }: { team: 0 | 1; stats: typeof TEAM_STATS_FULL.t0 }) {
-  const color  = team === 0 ? T0 : T1;
-  const label  = `Team ${team}`;
-  const wins   = team === 0 ? stats.possession > 50 : stats.possession < 50;
+  const color = team === 0 ? T0 : T1;
+  const label = `Team ${team}`;
+  const wins = team === 0 ? stats.possession > 50 : stats.possession < 50;
 
   return (
     <motion.div
@@ -92,9 +92,9 @@ function TeamHeader({ team, stats }: { team: 0 | 1; stats: typeof TEAM_STATS_FUL
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.5rem", marginTop: "1rem" }}>
         {[
           ["Possession", `${stats.possession}%`],
-          ["Shots",      stats.shots],
-          ["Pass Acc.",  `${stats.passAcc}%`],
-          ["Fatigue",    `${stats.avgFatigue}%`],
+          ["Shots", stats.shots],
+          ["Pass Acc.", `${stats.passAcc}%`],
+          ["Fatigue", `${stats.avgFatigue}%`],
         ].map(([k, v]) => (
           <div key={String(k)} style={{ background: "rgba(255,255,255,0.03)", borderRadius: "0.5rem", padding: "0.5rem" }}>
             <div style={{ fontSize: "1rem", fontWeight: 800, color }}>{v}</div>
@@ -182,7 +182,7 @@ export default function AnalyticsClient() {
               <Legend wrapperStyle={{ fontSize: "0.85rem", paddingTop: "1rem" }} />
               <Tooltip
                 contentStyle={{ background: "#1a1a1a", border: "1px solid #2a2a2a", borderRadius: "6px", fontSize: "0.8rem" }}
-                formatter={(v: number, name: string) => [`${v}`, name]}
+                formatter={(v: number | any, name: string | any) => [`${v}`, name]}
               />
             </RadarChart>
           </ResponsiveContainer>
@@ -210,16 +210,16 @@ export default function AnalyticsClient() {
             </div>
           </div>
 
-          <StatRow label="Possession"      v0={TEAM_STATS_FULL.t0.possession}     v1={TEAM_STATS_FULL.t1.possession}     unit="%" />
-          <StatRow label="Shots"           v0={TEAM_STATS_FULL.t0.shots}          v1={TEAM_STATS_FULL.t1.shots} />
-          <StatRow label="Shots on Target" v0={TEAM_STATS_FULL.t0.shotsOnTarget}  v1={TEAM_STATS_FULL.t1.shotsOnTarget} />
-          <StatRow label="Territory"       v0={TEAM_STATS_FULL.t0.territory}      v1={TEAM_STATS_FULL.t1.territory}      unit="%" />
-          <StatRow label="Momentum"        v0={TEAM_STATS_FULL.t0.momentum}       v1={TEAM_STATS_FULL.t1.momentum}       unit="%" />
-          <StatRow label="Total Passes"    v0={TEAM_STATS_FULL.t0.passes}         v1={TEAM_STATS_FULL.t1.passes} />
-          <StatRow label="Pass Accuracy"   v0={TEAM_STATS_FULL.t0.passAcc}        v1={TEAM_STATS_FULL.t1.passAcc}        unit="%" />
-          <StatRow label="Avg Fatigue"     v0={TEAM_STATS_FULL.t0.avgFatigue}     v1={TEAM_STATS_FULL.t1.avgFatigue}     unit="%" higherBetter={false} />
-          <StatRow label="Fouls"           v0={TEAM_STATS_FULL.t0.fouls}          v1={TEAM_STATS_FULL.t1.fouls}          higherBetter={false} />
-          <StatRow label="Corners"         v0={TEAM_STATS_FULL.t0.corners}        v1={TEAM_STATS_FULL.t1.corners} />
+          <StatRow label="Possession" v0={TEAM_STATS_FULL.t0.possession} v1={TEAM_STATS_FULL.t1.possession} unit="%" />
+          <StatRow label="Shots" v0={TEAM_STATS_FULL.t0.shots} v1={TEAM_STATS_FULL.t1.shots} />
+          <StatRow label="Shots on Target" v0={TEAM_STATS_FULL.t0.shotsOnTarget} v1={TEAM_STATS_FULL.t1.shotsOnTarget} />
+          <StatRow label="Territory" v0={TEAM_STATS_FULL.t0.territory} v1={TEAM_STATS_FULL.t1.territory} unit="%" />
+          <StatRow label="Momentum" v0={TEAM_STATS_FULL.t0.momentum} v1={TEAM_STATS_FULL.t1.momentum} unit="%" />
+          <StatRow label="Total Passes" v0={TEAM_STATS_FULL.t0.passes} v1={TEAM_STATS_FULL.t1.passes} />
+          <StatRow label="Pass Accuracy" v0={TEAM_STATS_FULL.t0.passAcc} v1={TEAM_STATS_FULL.t1.passAcc} unit="%" />
+          <StatRow label="Avg Fatigue" v0={TEAM_STATS_FULL.t0.avgFatigue} v1={TEAM_STATS_FULL.t1.avgFatigue} unit="%" higherBetter={false} />
+          <StatRow label="Fouls" v0={TEAM_STATS_FULL.t0.fouls} v1={TEAM_STATS_FULL.t1.fouls} higherBetter={false} />
+          <StatRow label="Corners" v0={TEAM_STATS_FULL.t0.corners} v1={TEAM_STATS_FULL.t1.corners} />
         </motion.div>
 
         {/* ── Possession / Momentum timeline ── */}
@@ -259,11 +259,11 @@ export default function AnalyticsClient() {
             <AreaChart data={timelineData} margin={{ left: 0, right: 16, top: 8, bottom: 0 }}>
               <defs>
                 <linearGradient id="gT0" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%"  stopColor={T0} stopOpacity={0.35} />
+                  <stop offset="5%" stopColor={T0} stopOpacity={0.35} />
                   <stop offset="95%" stopColor={T0} stopOpacity={0.02} />
                 </linearGradient>
                 <linearGradient id="gT1" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%"  stopColor={T1} stopOpacity={0.35} />
+                  <stop offset="5%" stopColor={T1} stopOpacity={0.35} />
                   <stop offset="95%" stopColor={T1} stopOpacity={0.02} />
                 </linearGradient>
               </defs>
@@ -274,7 +274,7 @@ export default function AnalyticsClient() {
                 tickFormatter={v => `${v}%`} />
               <Tooltip
                 contentStyle={{ background: "#1a1a1a", border: "1px solid #2a2a2a", borderRadius: "6px", fontSize: "0.8rem" }}
-                formatter={(v: number, name: string) => [`${v}%`, name === "t0" ? "Team 0" : "Team 1"]}
+                formatter={(v: number | any, name: string | any) => [`${v}%`, name === "t0" ? "Team 0" : "Team 1"]}
                 labelFormatter={l => `Min ${l}`}
               />
               <Legend formatter={v => v === "t0" ? "Team 0" : "Team 1"}
@@ -304,10 +304,10 @@ export default function AnalyticsClient() {
           <ResponsiveContainer width="100%" height={240}>
             <BarChart
               data={[
-                { name: "Possession%", T0: TEAM_STATS_FULL.t0.possession,   T1: TEAM_STATS_FULL.t1.possession   },
-                { name: "Territory%",  T0: TEAM_STATS_FULL.t0.territory,    T1: TEAM_STATS_FULL.t1.territory    },
-                { name: "Pass Acc%",   T0: TEAM_STATS_FULL.t0.passAcc,      T1: TEAM_STATS_FULL.t1.passAcc      },
-                { name: "Momentum%",   T0: TEAM_STATS_FULL.t0.momentum,     T1: TEAM_STATS_FULL.t1.momentum     },
+                { name: "Possession%", T0: TEAM_STATS_FULL.t0.possession, T1: TEAM_STATS_FULL.t1.possession },
+                { name: "Territory%", T0: TEAM_STATS_FULL.t0.territory, T1: TEAM_STATS_FULL.t1.territory },
+                { name: "Pass Acc%", T0: TEAM_STATS_FULL.t0.passAcc, T1: TEAM_STATS_FULL.t1.passAcc },
+                { name: "Momentum%", T0: TEAM_STATS_FULL.t0.momentum, T1: TEAM_STATS_FULL.t1.momentum },
               ]}
               margin={{ left: 0, right: 16, top: 4, bottom: 0 }}
             >
@@ -316,7 +316,7 @@ export default function AnalyticsClient() {
               <YAxis domain={[0, 100]} tick={{ fill: "#555", fontSize: 11 }} axisLine={false} tickLine={false}
                 tickFormatter={v => `${v}%`} />
               <Tooltip contentStyle={{ background: "#1a1a1a", border: "1px solid #2a2a2a", borderRadius: "6px", fontSize: "0.8rem" }}
-                formatter={(v: number, name: string) => [`${v}%`, name]} />
+                formatter={(v: number | any, name: string | any) => [`${v}%`, name]} />
               <Legend wrapperStyle={{ fontSize: "0.8rem", paddingTop: "0.5rem" }} />
               <Bar dataKey="T0" name="Team 0" fill={T0} radius={[4, 4, 0, 0]} barSize={36} />
               <Bar dataKey="T1" name="Team 1" fill={T1} radius={[4, 4, 0, 0]} barSize={36} />
