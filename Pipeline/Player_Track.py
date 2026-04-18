@@ -45,9 +45,10 @@ import pandas as pd
 
 
 # === YOUR VIDEO === SET ACCORDINGLY TO YOUR LOCAL SETUP
-SOURCE_VIDEO_PATH = "Test_Data/Testing.mp4"
-OUTPUT_VIDEO_PATH = "Test_Data/tracked_output.mp4"
-OUTPUT_CSV_PATH   = "Match_Data_CSV/1_tracking.csv"
+SOURCE_VIDEO_PATH   = "Test_Data/Testing.mp4"
+OUTPUT_VIDEO_PATH   = "Test_Data/tracked_output.mp4"       # final H.264 faststart (browser-ready)
+_RAW_VIDEO_PATH     = "Test_Data/tracked_output_raw.mp4"   # intermediate mp4v (deleted after remux)
+OUTPUT_CSV_PATH     = "Match_Data_CSV/1_tracking.csv"
 
 # === YOUR MODEL'S CLASS IDs (confirmed from Cell 7 output) ===
 BALL_ID       = 1
@@ -255,11 +256,16 @@ def process_all_frames(PLAYER_DETECTION_MODEL, FIELD_DETECTION_MODEL, CONFIG, te
 
     video_info = sv.VideoInfo.from_video_path(SOURCE_VIDEO_PATH)
     out = cv2.VideoWriter(
-        OUTPUT_VIDEO_PATH,
-        cv2.VideoWriter_fourcc(*"avc1"),
+        _RAW_VIDEO_PATH,
+        cv2.VideoWriter_fourcc(*"mp4v"),
         video_info.fps,
         (video_info.width, video_info.height)
     )
+    if not out.isOpened():
+        raise RuntimeError(
+            f"cv2.VideoWriter failed to open '{_RAW_VIDEO_PATH}' — "
+            "check that the output directory exists and the mp4v codec is available."
+        )
 
     tracking_records = []
     frame_number = 0
@@ -382,8 +388,42 @@ def process_all_frames(PLAYER_DETECTION_MODEL, FIELD_DETECTION_MODEL, CONFIG, te
         frame_number += 1
 
     out.release()
+    out = None  # prevent accidental double-release
 
-    # 10. Save CSV
+    # 10. Transcode raw mp4v → H.264 faststart so browsers can seek immediately.
+    #     Must decode+re-encode (not remux) because mp4v and H.264 are different codecs.
+    import av as _av, os as _os
+    from fractions import Fraction as _Fraction
+    try:
+        _inp = _av.open(_RAW_VIDEO_PATH)
+        _in_stream = _inp.streams.video[0]
+        _int_fps = round(float(_in_stream.average_rate))
+        _frame_tb = _Fraction(1, _int_fps)
+        _out = _av.open(OUTPUT_VIDEO_PATH, mode='w', options={'movflags': 'faststart'})
+        _out_stream = _out.add_stream('h264', rate=_int_fps)
+        _out_stream.width   = _in_stream.width
+        _out_stream.height  = _in_stream.height
+        _out_stream.pix_fmt = 'yuv420p'
+        _out_stream.options = {'crf': '23', 'preset': 'fast'}
+        _pts = 0
+        for _frame in _inp.decode(_in_stream):
+            _frame.pts = _pts
+            _frame.time_base = _frame_tb
+            _pts += 1
+            for _pkt in _out_stream.encode(_frame):
+                _out.mux(_pkt)
+        for _pkt in _out_stream.encode():
+            _out.mux(_pkt)
+        _inp.close()
+        _out.close()
+        _os.remove(_RAW_VIDEO_PATH)
+        print(f"[INFO] H.264 transcode complete → {OUTPUT_VIDEO_PATH}")
+    except Exception as _e:
+        print(f"[WARN] H.264 transcode failed ({_e}), keeping raw mp4v as output")
+        if _os.path.exists(_RAW_VIDEO_PATH):
+            _os.replace(_RAW_VIDEO_PATH, OUTPUT_VIDEO_PATH)
+
+    # 11. Save CSV
     df = pd.DataFrame(tracking_records)
     df.to_csv(OUTPUT_CSV_PATH, index=False)
 

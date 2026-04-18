@@ -76,6 +76,222 @@ async function parseMjpegStream(
   }
 }
 
+/* ── Helpers ────────────────────────────────────────────────────────────────── */
+function fmtTime(s: number): string {
+  if (!isFinite(s)) return "0:00";
+  const m = Math.floor(s / 60);
+  const sec = Math.floor(s % 60);
+  return `${m}:${sec.toString().padStart(2, "0")}`;
+}
+
+/* ── Custom video player for the final tracked output ───────────────────────── */
+function TrackedVideoPlayer({
+  done,
+  videoRef,
+}: {
+  done: boolean;
+  videoRef: React.RefObject<HTMLVideoElement | null>;
+}) {
+  const [playing,   setPlaying]   = useState(false);
+  const [current,   setCurrent]   = useState(0);
+  const [duration,  setDuration]  = useState(0);
+  const [speed,     setSpeed]     = useState(1);
+  const [fullscr,   setFullscr]   = useState(false);
+  const wrapRef = useRef<HTMLDivElement>(null);
+
+  const toggle = () => {
+    const v = videoRef.current;
+    if (!v) return;
+    if (v.paused) { v.play(); setPlaying(true); }
+    else          { v.pause(); setPlaying(false); }
+  };
+
+  const seek = (val: number) => {
+    const v = videoRef.current;
+    if (!v) return;
+    v.currentTime = val;
+    setCurrent(val);
+  };
+
+  const changeSpeed = (s: number) => {
+    const v = videoRef.current;
+    if (!v) return;
+    v.playbackRate = s;
+    setSpeed(s);
+  };
+
+  const toggleFullscreen = () => {
+    if (!wrapRef.current) return;
+    if (!document.fullscreenElement) {
+      wrapRef.current.requestFullscreen().then(() => setFullscr(true));
+    } else {
+      document.exitFullscreen().then(() => setFullscr(false));
+    }
+  };
+
+  /* Sync state from the video element */
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    const onTime  = () => setCurrent(v.currentTime);
+    const onMeta  = () => setDuration(v.duration);
+    const onPlay  = () => setPlaying(true);
+    const onPause = () => setPlaying(false);
+    const onEnded = () => setPlaying(false);
+    v.addEventListener("timeupdate",      onTime);
+    v.addEventListener("loadedmetadata",  onMeta);
+    v.addEventListener("play",            onPlay);
+    v.addEventListener("pause",           onPause);
+    v.addEventListener("ended",           onEnded);
+    return () => {
+      v.removeEventListener("timeupdate",     onTime);
+      v.removeEventListener("loadedmetadata", onMeta);
+      v.removeEventListener("play",           onPlay);
+      v.removeEventListener("pause",          onPause);
+      v.removeEventListener("ended",          onEnded);
+    };
+  }, [videoRef]);
+
+  const pct = duration > 0 ? (current / duration) * 100 : 0;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
+      {!done && (
+        <div style={{
+          display: "flex", alignItems: "center", gap: "8px",
+          padding: "6px 12px",
+          background: "rgba(34,197,94,0.08)",
+          border: "1px solid rgba(34,197,94,0.25)",
+          borderRadius: "8px",
+        }}>
+          <span style={{ width: 8, height: 8, borderRadius: "50%", background: "#22c55e", flexShrink: 0 }} />
+          <span style={{ fontSize: "0.78rem", color: "#22c55e" }}>Computing features in background…</span>
+        </div>
+      )}
+
+      {/* Video element — hidden native controls */}
+      <div ref={wrapRef} style={{ position: "relative", background: "#000", borderRadius: "0.75rem", overflow: "hidden" }}>
+        <video
+          ref={videoRef}
+          src={`${API}/video/tracked`}
+          playsInline
+          onClick={toggle}
+          style={{ width: "100%", display: "block", maxHeight: fullscr ? "100vh" : "400px", cursor: "pointer" }}
+        />
+        {/* Big play overlay when paused */}
+        {!playing && (
+          <div
+            onClick={toggle}
+            style={{
+              position: "absolute", inset: 0,
+              display: "flex", alignItems: "center", justifyContent: "center",
+              background: "rgba(0,0,0,0.35)", cursor: "pointer",
+            }}
+          >
+            <div style={{
+              width: 56, height: 56, borderRadius: "50%",
+              background: "rgba(212,175,55,0.9)",
+              display: "flex", alignItems: "center", justifyContent: "center",
+            }}>
+              <span style={{ fontSize: "1.4rem", marginLeft: 4 }}>▶</span>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Seek bar */}
+      <div style={{ display: "flex", flexDirection: "column", gap: "3px" }}>
+        <input
+          type="range"
+          min={0}
+          max={duration || 0}
+          step={0.1}
+          value={current}
+          onChange={e => seek(Number(e.target.value))}
+          style={{ width: "100%", accentColor: "#D4AF37", cursor: "pointer", height: "4px" }}
+        />
+        <div style={{ display: "flex", justifyContent: "space-between" }}>
+          <span style={{ fontSize: "0.7rem", color: "#666" }}>{fmtTime(current)}</span>
+          <span style={{ fontSize: "0.7rem", color: "#444" }}>{fmtTime(duration)}</span>
+        </div>
+      </div>
+
+      {/* Controls row */}
+      <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
+
+        {/* Play / Pause */}
+        <button
+          onClick={toggle}
+          style={{
+            padding: "0.38rem 0.9rem", borderRadius: "0.5rem",
+            fontSize: "0.82rem", fontWeight: 700, cursor: "pointer",
+            background: playing ? "rgba(212,175,55,0.12)" : "transparent",
+            border:     playing ? "1px solid #D4AF37"     : "1px solid #2a2a2a",
+            color:      playing ? "#D4AF37"               : "#888",
+          }}
+        >
+          {playing ? "⏸ Pause" : "▶ Play"}
+        </button>
+
+        {/* Speed */}
+        <select
+          value={speed}
+          onChange={e => changeSpeed(Number(e.target.value))}
+          style={{
+            padding: "0.38rem 0.5rem", borderRadius: "0.5rem",
+            fontSize: "0.82rem", fontWeight: 600,
+            background: "#111", border: "1px solid #2a2a2a", color: "#888",
+            cursor: "pointer",
+          }}
+        >
+          <option value={0.25}>0.25×</option>
+          <option value={0.5}>0.5×</option>
+          <option value={1}>1×</option>
+          <option value={1.5}>1.5×</option>
+          <option value={2}>2×</option>
+        </select>
+
+        {/* Skip back 10 s */}
+        <button
+          onClick={() => seek(Math.max(0, current - 10))}
+          title="−10 s"
+          style={{
+            padding: "0.38rem 0.7rem", borderRadius: "0.5rem",
+            fontSize: "0.82rem", cursor: "pointer",
+            background: "transparent", border: "1px solid #2a2a2a", color: "#888",
+          }}
+        >⏪ 10s</button>
+
+        {/* Skip forward 10 s */}
+        <button
+          onClick={() => seek(Math.min(duration, current + 10))}
+          title="+10 s"
+          style={{
+            padding: "0.38rem 0.7rem", borderRadius: "0.5rem",
+            fontSize: "0.82rem", cursor: "pointer",
+            background: "transparent", border: "1px solid #2a2a2a", color: "#888",
+          }}
+        >10s ⏩</button>
+
+        {/* Fullscreen */}
+        <button
+          onClick={toggleFullscreen}
+          style={{
+            marginLeft: "auto",
+            padding: "0.38rem 0.7rem", borderRadius: "0.5rem",
+            fontSize: "0.82rem", cursor: "pointer",
+            background: "transparent", border: "1px solid #2a2a2a", color: "#888",
+          }}
+        >{fullscr ? "⛶" : "⛶"} Fullscreen</button>
+      </div>
+
+      <p style={{ fontSize: "0.75rem", color: "#555", textAlign: "center" }}>
+        Player bounding boxes · Team colour labels · Ball tracking
+      </p>
+    </div>
+  );
+}
+
 /* ── Component ─────────────────────────────────────────────────────────────── */
 export default function VideoTab({
   done,
@@ -350,51 +566,10 @@ export default function VideoTab({
   }
 
   /* ════════════════════════════════════════════════════════════════════════════
-   * CASE 2 — Post-pipeline: native HTML5 video player (full seeking support)
+   * CASE 2 — Post-pipeline: custom video player (play/pause, seek, speed)
    * ════════════════════════════════════════════════════════════════════════════ */
   if (showVideo) {
-    return (
-      <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
-        {!done && (
-          <div style={{
-            display: "flex", alignItems: "center", gap: "8px",
-            padding: "6px 12px",
-            background: "rgba(34,197,94,0.08)",
-            border: "1px solid rgba(34,197,94,0.25)",
-            borderRadius: "8px",
-          }}>
-            <span style={{ width: 8, height: 8, borderRadius: "50%", background: "#22c55e", flexShrink: 0 }} />
-            <span style={{ fontSize: "0.78rem", color: "#22c55e" }}>
-              Computing features in background…
-            </span>
-          </div>
-        )}
-
-        {/*
-         * No key prop → React preserves the DOM element across re-renders,
-         * keeping the playback position stable while the pipeline finishes.
-         * playsInline prevents iOS from forcing fullscreen.
-         * Native `controls` provides timeline scrubber, volume, fullscreen.
-         */}
-        <video
-          ref={videoRef}
-          src={`${API}/video/tracked`}
-          controls
-          playsInline
-          style={{
-            width: "100%", display: "block",
-            borderRadius: "0.75rem",
-            border: "1px solid #2a2a2a",
-            background: "#000",
-            maxHeight: "420px",
-          }}
-        />
-
-        <p style={{ fontSize: "0.75rem", color: "#555", textAlign: "center" }}>
-          Player bounding boxes · Team colour labels · Ball tracking
-        </p>
-      </div>
-    );
+    return <TrackedVideoPlayer done={done} videoRef={videoRef} />;
   }
 
   /* ════════════════════════════════════════════════════════════════════════════

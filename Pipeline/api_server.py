@@ -8,10 +8,29 @@ Start from the Pipeline/ folder:
 Then open: http://localhost:3000/demo
 """
 
-import io
 import os
-import queue
 import sys
+
+# The system libcudart.so.12 is v12.0 but cuDNN 9.x needs 12.1+. We must
+# preload the venv's libcudart.so.12 (12.1) FIRST so cuDNN links against it
+# instead of the stale system version — otherwise cudnnCreate() fails with
+# CUDNN_STATUS_NOT_INITIALIZED (error 1001).
+try:
+    import ctypes
+    from pathlib import Path as _Path
+    import nvidia.cuda_runtime as _cuda_rt
+    import nvidia.cudnn as _cudnn
+    _rt_lib = _Path(_cuda_rt.__file__).parent / "lib" / "libcudart.so.12"
+    if _rt_lib.exists():
+        ctypes.CDLL(str(_rt_lib), mode=ctypes.RTLD_GLOBAL)
+    _cudnn_lib = _Path(_cudnn.__file__).parent / "lib" / "libcudnn.so.9"
+    if _cudnn_lib.exists():
+        ctypes.CDLL(str(_cudnn_lib), mode=ctypes.RTLD_GLOBAL)
+except Exception:
+    pass
+
+import io
+import queue
 import threading
 import zipfile
 from pathlib import Path
@@ -36,7 +55,7 @@ sys.path.insert(0, str(PIPELINE_DIR))
 
 # Load API keys from Pipeline/.env  (ROBOFLOW_API_KEY, HF_TOKEN, etc.)
 from dotenv import load_dotenv          # noqa: E402
-load_dotenv(PIPELINE_DIR / ".env")
+load_dotenv("../.env")
 
 # ── Pitch coordinate normalisation ─────────────────────────────────────────────
 _PX_MIN, _PX_MAX = 1405.4, 11780.6
@@ -335,12 +354,15 @@ def results_tracking():
 # ── GET /video/tracked ─────────────────────────────────────────────────────────
 @app.get("/video/tracked")
 def video_tracked():
-    if not TRACKED_VIDEO.exists():
+    if not TRACKED_VIDEO.exists() or TRACKED_VIDEO.stat().st_size == 0:
         raise HTTPException(status_code=404, detail="Tracked video not ready yet")
     return FileResponse(
         str(TRACKED_VIDEO),
         media_type="video/mp4",
-        headers={"Content-Disposition": "inline; filename=tracked_output.mp4"},
+        headers={
+            "Content-Disposition": "inline; filename=tracked_output.mp4",
+            "Accept-Ranges": "bytes",
+        },
     )
 
 
