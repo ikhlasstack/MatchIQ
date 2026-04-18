@@ -1,0 +1,35 @@
+# MatchIQ Python dependencies
+# Python 3.12, CUDA 12.1, GTX 1660 Super (WSL2)
+#
+# GPU setup (run once):
+#   pip install torch==2.5.1+cu121 torchvision==0.20.1+cu121 --index-url https://download.pytorch.org/whl/cu121
+#
+# CPU setup (alternative):
+#   pip install torch torchvision
+#
+# Then install the rest:
+#   pip install -r requirements2.txt
+
+numpy==1.26.4
+opencv-contrib-python==4.10.0.84
+supervision==0.27.0.post2
+sports @ git+https://github.com/roboflow/sports.git@42c80c06b6b65a7f89455b89fe31cdf4c38ba227
+pandas==2.3.3
+scipy==1.17.1
+av==14.2.0
+fastapi==0.115.14
+uvicorn==0.44.0
+python-multipart==0.0.26
+tqdm==4.67.3
+python-dotenv==1.0.1
+websocket-client==1.9.0
+
+# ── GPU ──────────────────────────────────────────────────────────────────────
+inference-gpu==1.2.1
+onnxruntime-gpu==1.21.1
+nvidia-cuda-runtime-cu12==12.1.105
+nvidia-cudnn-cu12==9.1.0.70
+
+# ── CPU (swap with GPU section above) ────────────────────────────────────────
+# inference==1.2.1
+# onnxruntime==1.21.1
