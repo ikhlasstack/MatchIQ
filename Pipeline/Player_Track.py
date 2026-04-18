@@ -62,6 +62,9 @@ load_dotenv()  # loads variables from .env into os.environ
 HF_TOKEN = os.getenv("HF_TOKEN")
 ROBOFLOW_API_KEY = os.getenv("ROBOFLOW_API_KEY")
 
+DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+CONFIG = SoccerPitchConfiguration()
+
 
 class RealTimePlayerTracker:
     def __init__(self, source_video_path=SOURCE_VIDEO_PATH, confidence=CONFIDENCE, stride=30, min_crops=100):
@@ -436,49 +439,33 @@ def process_all_frames(PLAYER_DETECTION_MODEL, FIELD_DETECTION_MODEL, CONFIG, te
     print(df[df['role'] == 'player'][['frame','player_id','x','y','pitch_x','pitch_y','team_id']].head(8))
 
 
-def player_tracking():
-    # 1 Load model
-    PLAYER_DETECTION_MODEL = get_model(
-    model_id="football-vgiqa-3njno/2",
-    api_key=ROBOFLOW_API_KEY
-)
-    FIELD_DETECTION_MODEL = get_model(
-    model_id="football-field-detection-f07vi/14",
-    api_key=ROBOFLOW_API_KEY
-)
-    # 2 pitchconfig
-    CONFIG = SoccerPitchConfiguration()
+def player_tracking(player_model=None, field_model=None):
+    # 1 Load models (skipped when pre-loaded models are passed in from api_server)
+    if player_model is None:
+        player_model = get_model(model_id="football-vgiqa-3njno/2", api_key=ROBOFLOW_API_KEY)
+    if field_model is None:
+        field_model = get_model(model_id="football-field-detection-f07vi/14", api_key=ROBOFLOW_API_KEY)
 
-    # 3 Player detect in frame
-    frame_generator = sv.get_video_frames_generator(SOURCE_VIDEO_PATH)
-    frame = next(frame_generator)
-
-    result = PLAYER_DETECTION_MODEL.infer(frame, confidence=CONFIDENCE)[0]
-    detections = sv.Detections.from_inference(result)
-
-    # 4 crops
-    DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Using: {DEVICE}")
     STRIDE = 30
 
-    crops=[]
+    # 2 Collect player crops for team classification (stride-30 pass)
+    crops = []
     for frame in tqdm(
-    sv.get_video_frames_generator(SOURCE_VIDEO_PATH, stride=STRIDE),
-    desc='Collecting crops'
+        sv.get_video_frames_generator(SOURCE_VIDEO_PATH, stride=STRIDE),
+        desc='Collecting crops'
     ):
-        result = PLAYER_DETECTION_MODEL.infer(frame, confidence=CONFIDENCE)[0]
+        result = player_model.infer(frame, confidence=CONFIDENCE)[0]
         detections = sv.Detections.from_inference(result)
-
-        # only collect actual players for fitting
         player_only = detections[detections.class_id == PLAYER_ID]
         player_crops = [sv.crop_image(frame, xyxy) for xyxy in player_only.xyxy]
         crops += player_crops
-    
-    # 5 team classifier
+
+    # 3 Team classifier (must re-fit per video — jersey colours differ)
     team_classifier = TeamClassifier(device=DEVICE)
     team_classifier.fit(crops)
 
-    # 6 DETECTION ON ALL FRAMES
-    process_all_frames(PLAYER_DETECTION_MODEL, FIELD_DETECTION_MODEL, CONFIG, team_classifier)
+    # 4 Detection on all frames
+    process_all_frames(player_model, field_model, CONFIG, team_classifier)
 
-    return 
+    return

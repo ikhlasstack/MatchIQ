@@ -33,3 +33,6 @@ nvidia-cudnn-cu12==9.1.0.70
 # ── CPU (swap with GPU section above) ────────────────────────────────────────
 # inference==1.2.1
 # onnxruntime==1.21.1
+
+uvicorn api_server:app --reload --port 8000
+

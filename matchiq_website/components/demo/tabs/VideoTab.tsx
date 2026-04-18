@@ -88,9 +88,11 @@ function fmtTime(s: number): string {
 function TrackedVideoPlayer({
   done,
   videoRef,
+  videoUrl,
 }: {
   done: boolean;
   videoRef: React.RefObject<HTMLVideoElement | null>;
+  videoUrl?: string;
 }) {
   const [playing,   setPlaying]   = useState(false);
   const [current,   setCurrent]   = useState(0);
@@ -173,7 +175,7 @@ function TrackedVideoPlayer({
       <div ref={wrapRef} style={{ position: "relative", background: "#000", borderRadius: "0.75rem", overflow: "hidden" }}>
         <video
           ref={videoRef}
-          src={`${API}/video/tracked`}
+          src={videoUrl ?? `${API}/video/tracked`}
           playsInline
           onClick={toggle}
           style={{ width: "100%", display: "block", maxHeight: fullscr ? "100vh" : "400px", cursor: "pointer" }}
@@ -297,10 +299,12 @@ export default function VideoTab({
   done,
   isStreaming,
   phase,
+  videoUrl,
 }: {
   done: boolean;
   isStreaming: boolean;
   phase: number;
+  videoUrl?: string;
 }) {
   /* ── post-pipeline <video> ref ── */
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -569,7 +573,7 @@ export default function VideoTab({
    * CASE 2 — Post-pipeline: custom video player (play/pause, seek, speed)
    * ════════════════════════════════════════════════════════════════════════════ */
   if (showVideo) {
-    return <TrackedVideoPlayer done={done} videoRef={videoRef} />;
+    return <TrackedVideoPlayer done={done} videoRef={videoRef} videoUrl={videoUrl} />;
   }
 
   /* ════════════════════════════════════════════════════════════════════════════

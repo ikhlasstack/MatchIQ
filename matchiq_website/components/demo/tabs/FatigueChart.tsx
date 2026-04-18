@@ -74,7 +74,7 @@ export default function FatigueChart({ data }: { data: FatigueRow[] | null }) {
 
       {/* Legend */}
       <div style={{ display: "flex", gap: "1rem", marginBottom: "1.25rem", flexWrap: "wrap" }}>
-        {[["LOW", "#22c55e"], ["MODERATE", "#eab308"], ["HIGH", "#f97316"], ["CRITICAL", "#ef4444"]].map(([l, c]) => (
+        {[["LOW", "#22c55e"], ["MEDIUM", "#eab308"], ["HIGH", "#f97316"], ["CRITICAL", "#ef4444"]].map(([l, c]) => (
           <div key={l} style={{ display: "flex", alignItems: "center", gap: "6px" }}>
             <div style={{ width: 10, height: 10, borderRadius: "50%", background: c }} />
             <span style={{ fontSize: "0.75rem", color: "#888" }}>{l}</span>

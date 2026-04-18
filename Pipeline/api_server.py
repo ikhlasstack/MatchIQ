@@ -30,9 +30,12 @@ except Exception:
     pass
 
 import io
+import json
 import queue
+import shutil
 import threading
 import zipfile
+from datetime import datetime
 from pathlib import Path
 
 import cv2
@@ -46,6 +49,7 @@ PIPELINE_DIR  = Path(__file__).parent.resolve()
 PROJECT_ROOT  = PIPELINE_DIR.parent
 TEST_DATA_DIR = PROJECT_ROOT / "Test_Data"
 CSV_DIR       = PROJECT_ROOT / "Match_Data_CSV"
+SAVED_DIR     = PROJECT_ROOT / "Saved_Matches"
 INPUT_VIDEO   = TEST_DATA_DIR / "Testing.mp4"
 TRACKED_VIDEO = TEST_DATA_DIR / "tracked_output.mp4"
 
@@ -56,6 +60,73 @@ sys.path.insert(0, str(PIPELINE_DIR))
 # Load API keys from Pipeline/.env  (ROBOFLOW_API_KEY, HF_TOKEN, etc.)
 from dotenv import load_dotenv          # noqa: E402
 load_dotenv("../.env")
+
+# ── Pre-loaded detection models (loaded once at startup, reused every pipeline run) ──
+_player_model = None
+_field_model  = None
+
+
+def _load_models():
+    global _player_model, _field_model
+    from inference import get_model  # noqa: PLC0415
+    api_key = os.getenv("ROBOFLOW_API_KEY")
+    print("[MatchIQ] Loading player detection model...")
+    _player_model = get_model(model_id="football-vgiqa-3njno/2", api_key=api_key)
+    print("[MatchIQ] Loading field detection model...")
+    _field_model  = get_model(model_id="football-field-detection-f07vi/14", api_key=api_key)
+    print("[MatchIQ] Models ready.")
+
+
+# ── Uploaded video filename (set during /upload, read by _save_match) ──────────
+_uploaded_filename: str = "Unknown.mp4"
+
+
+# ── Persistent match storage ───────────────────────────────────────────────────
+def _save_match(original_name: str):
+    """Copy all pipeline outputs into a timestamped folder under Saved_Matches/."""
+    match_id  = "match_" + datetime.now().strftime("%Y%m%d_%H%M%S")
+    match_dir = SAVED_DIR / match_id
+    match_dir.mkdir(parents=True, exist_ok=True)
+
+    csv_names = [
+        "1_tracking.csv",
+        "1_Movement_Features.csv",
+        "1_fatigue_scores.csv",
+        "1_goal_predictions.csv",
+        "1_match_predictions.csv",
+    ]
+    for name in csv_names:
+        src = CSV_DIR / name
+        if src.exists():
+            shutil.copy2(src, match_dir / name)
+
+    if TRACKED_VIDEO.exists():
+        shutil.copy2(TRACKED_VIDEO, match_dir / "tracked_output.mp4")
+
+    # Derive stats from tracking CSV
+    tracking_csv = match_dir / "1_tracking.csv"
+    frames, players, duration_str = 0, 0, "00:00"
+    if tracking_csv.exists():
+        import pandas as _pd
+        df = _pd.read_csv(tracking_csv)
+        frames  = int(df["frame"].max()) + 1 if not df.empty else 0
+        players = int(df["player_id"].nunique())
+        fps     = 25
+        secs    = frames // fps
+        duration_str = f"{secs // 60:02d}:{secs % 60:02d}"
+
+    meta = {
+        "id":       match_id,
+        "name":     original_name,
+        "date":     datetime.now().strftime("%Y-%m-%d"),
+        "saved_at": datetime.now().isoformat(timespec="seconds"),
+        "duration": duration_str,
+        "frames":   frames,
+        "players":  players,
+    }
+    (match_dir / "meta.json").write_text(json.dumps(meta, indent=2))
+    print(f"[MatchIQ] Match saved → {match_dir}")
+
 
 # ── Pitch coordinate normalisation ─────────────────────────────────────────────
 _PX_MIN, _PX_MAX = 1405.4, 11780.6
@@ -124,7 +195,7 @@ def _run_tracking_with_stream():
     _orig_video_writer = cv2.VideoWriter
     cv2.VideoWriter = _StreamingVideoWriter
     try:
-        player_tracking()
+        player_tracking(player_model=_player_model, field_model=_field_model)
     finally:
         cv2.VideoWriter = _orig_video_writer
         _orig_video_writer = None
@@ -157,7 +228,7 @@ def _run_pipeline():
         from goal_prob         import goal_prob     # noqa
         from Match_Outcome     import Match_Outcome # noqa
 
-        # ── Phase 1: Player tracking — skipped for testing (existing CSVs used) ──
+        # ── Phase 1: Player tracking ──────────────────────────────────────────
         _set(phase=1)
         _run_tracking_with_stream()
 
@@ -174,6 +245,7 @@ def _run_pipeline():
         _set(phase=4)
         Match_Outcome()
 
+        _save_match(original_name=_uploaded_filename)
         _set(done=True, running=False)
 
     except Exception as exc:
@@ -182,6 +254,12 @@ def _run_pipeline():
 
 # ── FastAPI app ────────────────────────────────────────────────────────────────
 app = FastAPI(title="MatchIQ API", version="1.0.0")
+
+
+@app.on_event("startup")
+def startup_load_models():
+    _load_models()
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -200,9 +278,11 @@ def health():
 # ── POST /upload ───────────────────────────────────────────────────────────────
 @app.post("/upload")
 async def upload_video(file: UploadFile = File(...)):
+    global _uploaded_filename
     TEST_DATA_DIR.mkdir(exist_ok=True)
     data = await file.read()
     INPUT_VIDEO.write_bytes(data)
+    _uploaded_filename = file.filename or "Unknown.mp4"
     _set(phase=0, done=False, error=None, running=False, streaming=False)
     return {"ok": True, "filename": file.filename, "bytes": len(data)}
 
@@ -267,13 +347,13 @@ def results_fatigue():
     path = CSV_DIR / "1_fatigue_scores.csv"
     if not path.exists():
         return []
-    df = pd.read_csv(path).reset_index()
+    df = pd.read_csv(path)
     df["fatigue_score"] = (df["fatigue_score"] * 100).round(1)
+    df = df.sort_values("player_id")
     records = []
     for _, row in df.iterrows():
-        pid = row.get("player_id", row.get("index", "?"))
         records.append({
-            "label": f"P{int(pid)}",
+            "label": f"P{int(row['player_id'])}",
             "score": float(row["fatigue_score"]),
             "level": str(row.get("fatigue_level", "LOW")),
             "team":  int(row["team_id"]) if pd.notna(row.get("team_id")) else -1,
@@ -381,6 +461,143 @@ def download_csv():
         buf,
         media_type="application/zip",
         headers={"Content-Disposition": "attachment; filename=matchiq_data.zip"},
+    )
+
+
+# ── GET /matches — list all saved matches ─────────────────────────────────────
+@app.get("/matches")
+def list_matches():
+    if not SAVED_DIR.exists():
+        return []
+    matches = []
+    for meta_file in sorted(SAVED_DIR.glob("*/meta.json"), reverse=True):
+        try:
+            matches.append(json.loads(meta_file.read_text()))
+        except Exception:
+            pass
+    return matches
+
+
+# ── GET /matches/{match_id} — single match meta ───────────────────────────────
+@app.get("/matches/{match_id}")
+def get_match(match_id: str):
+    meta_file = SAVED_DIR / match_id / "meta.json"
+    if not meta_file.exists():
+        raise HTTPException(status_code=404, detail="Match not found")
+    return json.loads(meta_file.read_text())
+
+
+# ── Helpers for saved-match result endpoints ───────────────────────────────────
+def _match_dir(match_id: str) -> Path:
+    d = SAVED_DIR / match_id
+    if not d.exists():
+        raise HTTPException(status_code=404, detail="Match not found")
+    return d
+
+
+# ── GET /matches/{match_id}/results/fatigue ────────────────────────────────────
+@app.get("/matches/{match_id}/results/fatigue")
+def saved_fatigue(match_id: str):
+    path = _match_dir(match_id) / "1_fatigue_scores.csv"
+    if not path.exists():
+        return []
+    df = pd.read_csv(path)
+    df["fatigue_score"] = (df["fatigue_score"] * 100).round(1)
+    df = df.sort_values("player_id")
+    return [
+        {
+            "label": f"P{int(r['player_id'])}",
+            "score": float(r["fatigue_score"]),
+            "level": str(r.get("fatigue_level", "LOW")),
+            "team":  int(r["team_id"]) if pd.notna(r.get("team_id")) else -1,
+        }
+        for _, r in df.iterrows()
+    ]
+
+
+# ── GET /matches/{match_id}/results/goal-prob ──────────────────────────────────
+@app.get("/matches/{match_id}/results/goal-prob")
+def saved_goal_prob(match_id: str):
+    path = _match_dir(match_id) / "1_goal_predictions.csv"
+    if not path.exists():
+        return []
+    df     = pd.read_csv(path)
+    frames = sorted(df["frame"].unique())
+    step   = max(1, len(frames) // 150)
+    result = []
+    for frame in frames[::step]:
+        fdf = df[df["frame"] == frame]
+        t0  = fdf[fdf["team_id"] == 0]["goal_probability"].max()
+        t1  = fdf[fdf["team_id"] == 1]["goal_probability"].max()
+        result.append({
+            "frame": int(frame),
+            "t0": round(float(t0) if pd.notna(t0) else 0.0, 3),
+            "t1": round(float(t1) if pd.notna(t1) else 0.0, 3),
+        })
+    return result
+
+
+# ── GET /matches/{match_id}/results/outcome ────────────────────────────────────
+@app.get("/matches/{match_id}/results/outcome")
+def saved_outcome(match_id: str):
+    path = _match_dir(match_id) / "1_match_predictions.csv"
+    if not path.exists():
+        return {}
+    row = pd.read_csv(path).iloc[0].to_dict()
+
+    def pct(k): return round(float(row.get(k, 0)) * 100, 1)
+    def val(k): return round(float(row.get(k, 0)), 1)
+
+    return {
+        "winA":       pct("win_prob_team0"),
+        "draw":       pct("draw_prob"),
+        "winB":       pct("win_prob_team1"),
+        "possession": {"t0": val("possession_team0"), "t1": val("possession_team1")},
+        "shots":      {"t0": int(row.get("shots_team0", 0)), "t1": int(row.get("shots_team1", 0))},
+        "territory":  {"t0": val("territory_team0"),  "t1": val("territory_team1")},
+        "momentum":   {"t0": val("momentum_team0"),   "t1": val("momentum_team1")},
+    }
+
+
+# ── GET /matches/{match_id}/results/tracking ──────────────────────────────────
+@app.get("/matches/{match_id}/results/tracking")
+def saved_tracking(match_id: str):
+    path = _match_dir(match_id) / "1_tracking.csv"
+    if not path.exists():
+        return []
+    df         = pd.read_csv(path)
+    last_frame = df["frame"].max()
+    records    = []
+    for _, row in df[df["frame"] == last_frame].iterrows():
+        px, py = _norm_pct(row.get("pitch_x"), row.get("pitch_y"))
+        if px is None:
+            raw_x = row.get("x", 960)
+            raw_y = row.get("y", 540)
+            px = round(float(raw_x) / 1920 * 100, 2) if pd.notna(raw_x) else 50.0
+            py = round(float(raw_y) / 1080 * 100, 2) if pd.notna(raw_y) else 50.0
+        records.append({
+            "id":   int(row["player_id"]),
+            "team": int(row["team_id"]) if pd.notna(row.get("team_id")) else -1,
+            "role": str(row["role"]),
+            "x":    px,
+            "y":    py,
+        })
+    return records
+
+
+# ── GET /matches/{match_id}/video ──────────────────────────────────────────────
+@app.get("/matches/{match_id}/video")
+def saved_video(match_id: str):
+    video = _match_dir(match_id) / "tracked_output.mp4"
+    if not video.exists() or video.stat().st_size == 0:
+        raise HTTPException(status_code=404, detail="Video not found for this match")
+    return FileResponse(
+        str(video),
+        media_type="video/mp4",
+        headers={
+            "Content-Disposition": f"inline; filename={match_id}.mp4",
+            "Accept-Ranges": "bytes",
+        },
     )
 
 
