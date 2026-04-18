@@ -45,9 +45,9 @@ import pandas as pd
 
 
 # === YOUR VIDEO === SET ACCORDINGLY TO YOUR LOCAL SETUP
-SOURCE_VIDEO_PATH = "Test_Data/Testing.mp4"
-OUTPUT_VIDEO_PATH = "Test_Data/tracked_output.mp4"
-OUTPUT_CSV_PATH   = "Math_Data_CSV/1_tracking.csv"
+SOURCE_VIDEO_PATH  = "../Test_Data/Testing.mp4"
+OUTPUT_VIDEO_PATH  = "../Test_Data/tracked_output.mp4"
+OUTPUT_CSV_PATH    = "../Match_Data_CSV/1_tracking.csv"
 
 # === YOUR MODEL'S CLASS IDs (confirmed from Cell 7 output) ===
 BALL_ID       = 1
