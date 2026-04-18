@@ -1,0 +1,23 @@
+#--extra-index-url https://download.pytorch.org/whl/cu121
+
+# Core ML / Computer Vision
+#torch==2.5.1+cu121
+# i have cpu so i did 
+#pip install torch torchvision
+numpy==2.3.5
+opencv-contrib-python==4.10.0.84
+supervision==0.27.0.post2
+
+#inference-gpu==1.2.2
+inference==1.2.2
+
+sports @ git+https://github.com/roboflow/sports.git@42c80c06b6b65a7f89455b89fe31cdf4c38ba227
+
+# Data Processing
+pandas==2.3.3
+scipy==1.17.1
+
+# Utilities
+tqdm==4.67.3
+python-dotenv==1.0.1
+websocket-client==1.9.0
