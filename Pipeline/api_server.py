@@ -59,7 +59,7 @@ sys.path.insert(0, str(PIPELINE_DIR))
 
 # Load API keys from Pipeline/.env  (ROBOFLOW_API_KEY, HF_TOKEN, etc.)
 from dotenv import load_dotenv          # noqa: E402
-load_dotenv("../.env")
+load_dotenv(PIPELINE_DIR / ".env")
 
 # ── Pre-loaded detection models (loaded once at startup, reused every pipeline run) ──
 _player_model = None
@@ -110,7 +110,7 @@ def _save_match(original_name: str):
         import pandas as _pd
         df = _pd.read_csv(tracking_csv)
         frames  = int(df["frame"].max()) + 1 if not df.empty else 0
-        players = int(df["player_id"].nunique())
+        players = int(df[~df["role"].str.lower().isin(_EXCLUDE_ROLES)]["player_id"].nunique())
         fps     = 25
         secs    = frames // fps
         duration_str = f"{secs // 60:02d}:{secs % 60:02d}"
@@ -126,6 +126,18 @@ def _save_match(original_name: str):
     }
     (match_dir / "meta.json").write_text(json.dumps(meta, indent=2))
     print(f"[MatchIQ] Match saved → {match_dir}")
+
+
+# ── Non-player ID helper ───────────────────────────────────────────────────────
+_EXCLUDE_ROLES = {"referee", "ball"}
+
+def _non_player_ids(csv_dir: Path) -> set:
+    """Return player_ids whose role is referee or ball in the tracking CSV."""
+    tracking = csv_dir / "1_tracking.csv"
+    if not tracking.exists():
+        return set()
+    df = pd.read_csv(tracking, usecols=["player_id", "role"])
+    return set(df.loc[df["role"].str.lower().isin(_EXCLUDE_ROLES), "player_id"].unique())
 
 
 # ── Pitch coordinate normalisation ─────────────────────────────────────────────
@@ -347,7 +359,9 @@ def results_fatigue():
     path = CSV_DIR / "1_fatigue_scores.csv"
     if not path.exists():
         return []
+    ref_ids = _non_player_ids(CSV_DIR)
     df = pd.read_csv(path)
+    df = df[~df["player_id"].isin(ref_ids)]
     df["fatigue_score"] = (df["fatigue_score"] * 100).round(1)
     df = df.sort_values("player_id")
     records = []
@@ -367,7 +381,9 @@ def results_goal_prob():
     path = CSV_DIR / "1_goal_predictions.csv"
     if not path.exists():
         return []
+    ref_ids = _non_player_ids(CSV_DIR)
     df     = pd.read_csv(path)
+    df     = df[~df["player_id"].isin(ref_ids)]
     frames = sorted(df["frame"].unique())
     step   = max(1, len(frames) // 150)
     result = []
@@ -383,26 +399,127 @@ def results_goal_prob():
     return result
 
 
+# ── Outcome computation helper (recalculates from raw CSVs) ───────────────────
+_PITCH_X_MIN, _PITCH_X_MAX = 1405.4, 11780.6
+_SHOT_THRESHOLD = 0.65
+_SHOT_COOLDOWN  = 15
+
+
+def _compute_outcome(csv_dir: Path) -> dict:
+    """Recalculate all match outcome stats from raw CSVs, excluding referees/ball."""
+    import numpy as _np
+
+    tracking_path = csv_dir / "1_tracking.csv"
+    goal_path     = csv_dir / "1_goal_predictions.csv"
+    movement_path = csv_dir / "1_Movement_Features.csv"
+
+    if not all(p.exists() for p in [tracking_path, goal_path, movement_path]):
+        return {}
+
+    tracking  = pd.read_csv(tracking_path)
+    goal_prob = pd.read_csv(goal_path)
+    movement  = pd.read_csv(movement_path)
+
+    excl = _non_player_ids(csv_dir)
+    gp   = goal_prob[~goal_prob["player_id"].isin(excl)]
+
+    # ── Shots (deduplicated per player with frame cooldown) ──────────────────
+    shots: dict = {0: 0, 1: 0}
+    last_shot: dict = {}
+    for _, row in gp[gp["goal_probability"] >= _SHOT_THRESHOLD].sort_values("frame").iterrows():
+        pid, frame, team = int(row["player_id"]), int(row["frame"]), int(row["team_id"])
+        if team not in (0, 1):
+            continue
+        if frame - last_shot.get(pid, -_SHOT_COOLDOWN) >= _SHOT_COOLDOWN:
+            shots[team] += 1
+            last_shot[pid] = frame
+
+    # ── Average danger ────────────────────────────────────────────────────────
+    avg_danger = {
+        0: round(float(gp[gp["team_id"] == 0]["goal_probability"].mean() or 0), 3),
+        1: round(float(gp[gp["team_id"] == 1]["goal_probability"].mean() or 0), 3),
+    }
+
+    # ── Possession (closest player to ball per frame) ─────────────────────────
+    ball_df    = tracking[tracking["role"] == "ball"][["frame", "x", "y"]].rename(
+        columns={"x": "ball_x", "y": "ball_y"})
+    players_df = tracking[tracking["role"].isin(["player", "goalkeeper"]) &
+                          ~tracking["player_id"].isin(excl)].copy()
+    merged = players_df.merge(ball_df, on="frame", how="inner")
+    if merged.empty:
+        possession = {0: 50.0, 1: 50.0}
+    else:
+        merged["dist"] = _np.sqrt((merged["x"] - merged["ball_x"])**2 +
+                                  (merged["y"] - merged["ball_y"])**2)
+        closest = merged.loc[merged.groupby("frame")["dist"].idxmin()]
+        pc  = closest["team_id"].value_counts()
+        tot = pc.sum()
+        possession = {
+            0: round(pc.get(0, 0) / tot * 100, 1),
+            1: round(pc.get(1, 0) / tot * 100, 1),
+        }
+
+    # ── Territory (fraction of frames in attacking half) ──────────────────────
+    pl = tracking[tracking["role"].isin(["player", "goalkeeper"]) &
+                  ~tracking["player_id"].isin(excl)].dropna(subset=["pitch_x"]).copy()
+    pl["px_m"] = (pl["pitch_x"] - _PITCH_X_MIN) / (_PITCH_X_MAX - _PITCH_X_MIN) * 105
+    t0 = pl[pl["team_id"] == 0]; t1 = pl[pl["team_id"] == 1]
+    territory = {
+        0: round(float((t0["px_m"] > 52.5).mean() * 100) if len(t0) else 50.0, 1),
+        1: round(float((t1["px_m"] < 52.5).mean() * 100) if len(t1) else 50.0, 1),
+    }
+
+    # ── Momentum (avg speed in last 20% of match) ─────────────────────────────
+    total_frames   = int(movement["frame"].max())
+    recent_cutoff  = int(total_frames * 0.8)
+    recent = movement[(movement["frame"] >= recent_cutoff) &
+                      (movement["team_id"] >= 0) &
+                      (~movement["player_id"].isin(excl))].copy()
+    rs       = recent.groupby("team_id")["speed"].mean()
+    total_rs = rs.sum()
+    momentum = {
+        0: round(float(rs.get(0, 0) / total_rs * 100) if total_rs > 0 else 50.0, 1),
+        1: round(float(rs.get(1, 0) / total_rs * 100) if total_rs > 0 else 50.0, 1),
+    }
+
+    # ── Win probability (weighted strength → sigmoid) ─────────────────────────
+    ts = shots[0] + shots[1] + 1e-6
+    td = avg_danger[0] + avg_danger[1] + 1e-6
+    strength = {
+        t: (0.25 * shots[t] / ts +
+            0.25 * avg_danger[t] / td +
+            0.20 * possession[t] / 100 +
+            0.15 * territory[t] / 100 +
+            0.15 * momentum[t] / 100)
+        for t in (0, 1)
+    }
+    diff = strength[0] - strength[1]
+    w0   = 1 / (1 + _np.exp(-10 * diff))
+    w1   = 1 - w0
+    draw = max(0.0, 0.3 - abs(diff) * 2)
+    tp   = w0 + w1 + draw
+    w0   = round(w0   / tp * 100, 1)
+    w1   = round(w1   / tp * 100, 1)
+    draw = round(draw / tp * 100, 1)
+
+    return {
+        "winA":       w0,
+        "draw":       draw,
+        "winB":       w1,
+        "possession": {"t0": possession[0], "t1": possession[1]},
+        "shots":      {"t0": shots[0],      "t1": shots[1]},
+        "territory":  {"t0": territory[0],  "t1": territory[1]},
+        "momentum":   {"t0": momentum[0],   "t1": momentum[1]},
+    }
+
+
 # ── GET /results/outcome ───────────────────────────────────────────────────────
 @app.get("/results/outcome")
 def results_outcome():
-    path = CSV_DIR / "1_match_predictions.csv"
-    if not path.exists():
+    result = _compute_outcome(CSV_DIR)
+    if not result:
         return {}
-    row = pd.read_csv(path).iloc[0].to_dict()
-
-    def pct(k): return round(float(row.get(k, 0)) * 100, 1)
-    def val(k): return round(float(row.get(k, 0)), 1)
-
-    return {
-        "winA":       pct("win_prob_team0"),
-        "draw":       pct("draw_prob"),
-        "winB":       pct("win_prob_team1"),
-        "possession": {"t0": val("possession_team0"), "t1": val("possession_team1")},
-        "shots":      {"t0": int(row.get("shots_team0", 0)), "t1": int(row.get("shots_team1", 0))},
-        "territory":  {"t0": val("territory_team0"),  "t1": val("territory_team1")},
-        "momentum":   {"t0": val("momentum_team0"),   "t1": val("momentum_team1")},
-    }
+    return result
 
 
 # ── GET /results/tracking ──────────────────────────────────────────────────────
@@ -498,10 +615,13 @@ def _match_dir(match_id: str) -> Path:
 # ── GET /matches/{match_id}/results/fatigue ────────────────────────────────────
 @app.get("/matches/{match_id}/results/fatigue")
 def saved_fatigue(match_id: str):
-    path = _match_dir(match_id) / "1_fatigue_scores.csv"
+    d    = _match_dir(match_id)
+    path = d / "1_fatigue_scores.csv"
     if not path.exists():
         return []
+    ref_ids = _non_player_ids(d)
     df = pd.read_csv(path)
+    df = df[~df["player_id"].isin(ref_ids)]
     df["fatigue_score"] = (df["fatigue_score"] * 100).round(1)
     df = df.sort_values("player_id")
     return [
@@ -518,10 +638,13 @@ def saved_fatigue(match_id: str):
 # ── GET /matches/{match_id}/results/goal-prob ──────────────────────────────────
 @app.get("/matches/{match_id}/results/goal-prob")
 def saved_goal_prob(match_id: str):
-    path = _match_dir(match_id) / "1_goal_predictions.csv"
+    d    = _match_dir(match_id)
+    path = d / "1_goal_predictions.csv"
     if not path.exists():
         return []
+    ref_ids = _non_player_ids(d)
     df     = pd.read_csv(path)
+    df     = df[~df["player_id"].isin(ref_ids)]
     frames = sorted(df["frame"].unique())
     step   = max(1, len(frames) // 150)
     result = []
@@ -540,23 +663,11 @@ def saved_goal_prob(match_id: str):
 # ── GET /matches/{match_id}/results/outcome ────────────────────────────────────
 @app.get("/matches/{match_id}/results/outcome")
 def saved_outcome(match_id: str):
-    path = _match_dir(match_id) / "1_match_predictions.csv"
-    if not path.exists():
+    d      = _match_dir(match_id)
+    result = _compute_outcome(d)
+    if not result:
         return {}
-    row = pd.read_csv(path).iloc[0].to_dict()
-
-    def pct(k): return round(float(row.get(k, 0)) * 100, 1)
-    def val(k): return round(float(row.get(k, 0)), 1)
-
-    return {
-        "winA":       pct("win_prob_team0"),
-        "draw":       pct("draw_prob"),
-        "winB":       pct("win_prob_team1"),
-        "possession": {"t0": val("possession_team0"), "t1": val("possession_team1")},
-        "shots":      {"t0": int(row.get("shots_team0", 0)), "t1": int(row.get("shots_team1", 0))},
-        "territory":  {"t0": val("territory_team0"),  "t1": val("territory_team1")},
-        "momentum":   {"t0": val("momentum_team0"),   "t1": val("momentum_team1")},
-    }
+    return result
 
 
 # ── GET /matches/{match_id}/results/tracking ──────────────────────────────────
@@ -583,6 +694,72 @@ def saved_tracking(match_id: str):
             "y":    py,
         })
     return records
+
+
+# ── GET /matches/{match_id}/results/movement ──────────────────────────────────
+@app.get("/matches/{match_id}/results/movement")
+def saved_movement(match_id: str):
+    """Per-player aggregated movement stats from 1_Movement_Features.csv.
+
+    Returns one record per player:
+      player_id, team_id, avg_speed, max_speed, total_sprints,
+      speed_series  – sampled speed over time (up to 60 points)
+      accel_series  – matching acceleration values
+      sprint_zones  – sprint count in 6 equal frame-range buckets
+    """
+    d    = _match_dir(match_id)
+    path = d / "1_Movement_Features.csv"
+    if not path.exists():
+        return []
+    ref_ids = _non_player_ids(d)
+    df = pd.read_csv(path)
+    df = df[~df["player_id"].isin(ref_ids)]
+    if df.empty:
+        return []
+
+    max_frame = int(df["frame"].max()) if not df.empty else 1
+    result = []
+    for pid, grp in df.groupby("player_id"):
+        grp = grp.sort_values("frame")
+        team_id = int(grp["team_id"].iloc[0]) if pd.notna(grp["team_id"].iloc[0]) else -1
+
+        # Summary stats
+        avg_speed    = round(float(grp["speed"].mean()), 2)
+        max_speed    = round(float(grp["speed"].max()), 2)
+        total_sprints = int(grp["is_sprint"].sum()) if "is_sprint" in grp.columns else 0
+
+        # Speed / accel series — sample to ≤60 points
+        step = max(1, len(grp) // 60)
+        sampled = grp.iloc[::step]
+        speed_series = [
+            {"frame": int(r["frame"]), "speed": round(float(r["speed"]), 2),
+             "accel": round(float(r.get("acceleration", 0) or 0), 2)}
+            for _, r in sampled.iterrows()
+        ]
+
+        # Sprint zones — 6 equal buckets across full match frame range
+        zone_size = max(1, max_frame // 6)
+        sprint_zones = []
+        for z in range(6):
+            lo = z * zone_size
+            hi = (z + 1) * zone_size if z < 5 else max_frame + 1
+            label = f"{lo}–{hi - 1}"
+            count = int(grp[(grp["frame"] >= lo) & (grp["frame"] < hi)]["is_sprint"].sum()) \
+                if "is_sprint" in grp.columns else 0
+            sprint_zones.append({"zone": label, "sprints": count})
+
+        result.append({
+            "player_id":    int(pid),
+            "team_id":      team_id,
+            "avg_speed":    avg_speed,
+            "max_speed":    max_speed,
+            "total_sprints": total_sprints,
+            "speed_series": speed_series,
+            "sprint_zones": sprint_zones,
+        })
+
+    result.sort(key=lambda r: r["player_id"])
+    return result
 
 
 # ── GET /matches/{match_id}/video ──────────────────────────────────────────────

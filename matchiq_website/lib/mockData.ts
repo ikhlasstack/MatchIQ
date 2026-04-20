@@ -188,6 +188,147 @@ export const MOMENTUM_TIMELINE = [
   { minute: 90, t0: 55, t1: 45 },
 ];
 
+/* ── Team Performance Across Matches (Compare page v2) ── */
+export const COMPARE_TEAM_MATCHES = [
+  {
+    id: "Match_001",
+    label: "Match_001 — Apr 01",
+    teams: [
+      { id: 0, label: "Team 1 (Blue)", players: 11, frames: 750 },
+      { id: 1, label: "Team 2 (Pink)", players: 11, frames: 750 },
+    ],
+  },
+  {
+    id: "Match_002",
+    label: "Match_002 — Apr 02",
+    teams: [
+      { id: 0, label: "Team 1 (Blue)", players: 11, frames: 820 },
+      { id: 1, label: "Team 2 (Pink)", players: 11, frames: 820 },
+    ],
+  },
+  {
+    id: "Match_003",
+    label: "Match_003 — Apr 04",
+    teams: [
+      { id: 0, label: "Team 1 (Blue)", players: 11, frames: 700 },
+      { id: 1, label: "Team 2 (Pink)", players: 10, frames: 700 },
+    ],
+  },
+  {
+    id: "Match_004",
+    label: "Match_004 — Apr 05",
+    teams: [
+      { id: 0, label: "Team 1 (Blue)", players: 11, frames: 810 },
+      { id: 1, label: "Team 2 (Pink)", players: 11, frames: 810 },
+    ],
+  },
+  {
+    id: "Match_005",
+    label: "Match_005 — Apr 06",
+    teams: [
+      { id: 0, label: "Team 1 (Blue)", players: 11, frames: 790 },
+      { id: 1, label: "Team 2 (Pink)", players: 11, frames: 790 },
+    ],
+  },
+];
+
+export type TeamStats = {
+  possession: number;
+  shots: number;
+  territory: number;
+  momentum: number;
+  avg_goal_prob: number;
+  avg_speed: number;
+  total_sprints: number;
+  avg_fatigue: number;
+  player_fatigue: Record<number, number>;
+  speed_timeline: number[];
+  goal_prob_timeline: number[];
+};
+
+export const TEAM_MATCH_STATS: Record<string, Record<number, TeamStats>> = {
+  Match_001: {
+    0: {
+      possession: 58, shots: 9, territory: 55, momentum: 63,
+      avg_goal_prob: 0.31, avg_speed: 67, total_sprints: 234, avg_fatigue: 0.42,
+      player_fatigue: { 1: 0.32, 3: 0.57, 6: 0.49, 7: 0.61, 9: 0.28, 11: 0.48, 14: 0.47 },
+      speed_timeline: [45, 52, 61, 70, 68, 74, 71, 65, 58, 50],
+      goal_prob_timeline: [0.18, 0.22, 0.31, 0.45, 0.38, 0.29, 0.41, 0.35, 0.28, 0.22],
+    },
+    1: {
+      possession: 42, shots: 5, territory: 45, momentum: 37,
+      avg_goal_prob: 0.19, avg_speed: 61, total_sprints: 198, avg_fatigue: 0.54,
+      player_fatigue: { 1: 0.45, 3: 0.62, 6: 0.38, 7: 0.71, 9: 0.55, 11: 0.41, 14: 0.60 },
+      speed_timeline: [42, 49, 57, 63, 59, 66, 62, 58, 53, 46],
+      goal_prob_timeline: [0.12, 0.16, 0.21, 0.33, 0.28, 0.20, 0.31, 0.25, 0.19, 0.14],
+    },
+  },
+  Match_002: {
+    0: {
+      possession: 43, shots: 4, territory: 38, momentum: 40,
+      avg_goal_prob: 0.22, avg_speed: 54, total_sprints: 167, avg_fatigue: 0.61,
+      player_fatigue: { 1: 0.61, 3: 0.72, 6: 0.55, 7: 0.48, 9: 0.39, 11: 0.58, 14: 0.63 },
+      speed_timeline: [41, 48, 53, 58, 55, 51, 47, 44, 40, 38],
+      goal_prob_timeline: [0.14, 0.19, 0.24, 0.31, 0.27, 0.22, 0.28, 0.25, 0.19, 0.16],
+    },
+    1: {
+      possession: 57, shots: 8, territory: 62, momentum: 60,
+      avg_goal_prob: 0.34, avg_speed: 71, total_sprints: 248, avg_fatigue: 0.38,
+      player_fatigue: { 1: 0.29, 3: 0.41, 6: 0.52, 7: 0.35, 9: 0.44, 11: 0.31, 14: 0.39 },
+      speed_timeline: [50, 58, 66, 74, 70, 77, 73, 68, 62, 55],
+      goal_prob_timeline: [0.22, 0.28, 0.37, 0.50, 0.43, 0.35, 0.46, 0.40, 0.33, 0.26],
+    },
+  },
+  Match_003: {
+    0: {
+      possession: 61, shots: 11, territory: 60, momentum: 72,
+      avg_goal_prob: 0.38, avg_speed: 72, total_sprints: 261, avg_fatigue: 0.38,
+      player_fatigue: { 1: 0.25, 3: 0.44, 6: 0.41, 7: 0.52, 9: 0.30, 11: 0.38, 14: 0.42 },
+      speed_timeline: [50, 59, 68, 76, 73, 80, 77, 70, 64, 56],
+      goal_prob_timeline: [0.22, 0.30, 0.40, 0.54, 0.46, 0.37, 0.50, 0.43, 0.34, 0.27],
+    },
+    1: {
+      possession: 39, shots: 3, territory: 40, momentum: 28,
+      avg_goal_prob: 0.14, avg_speed: 49, total_sprints: 142, avg_fatigue: 0.72,
+      player_fatigue: { 1: 0.70, 3: 0.80, 6: 0.65, 7: 0.58, 9: 0.75, 11: 0.68, 14: 0.74 },
+      speed_timeline: [38, 44, 49, 53, 50, 46, 43, 40, 36, 33],
+      goal_prob_timeline: [0.10, 0.14, 0.18, 0.24, 0.20, 0.16, 0.21, 0.18, 0.13, 0.11],
+    },
+  },
+  Match_004: {
+    0: {
+      possession: 50, shots: 6, territory: 50, momentum: 51,
+      avg_goal_prob: 0.26, avg_speed: 62, total_sprints: 201, avg_fatigue: 0.50,
+      player_fatigue: { 1: 0.40, 3: 0.58, 6: 0.47, 7: 0.55, 9: 0.43, 11: 0.50, 14: 0.52 },
+      speed_timeline: [44, 51, 59, 66, 63, 68, 65, 61, 56, 49],
+      goal_prob_timeline: [0.16, 0.21, 0.28, 0.38, 0.33, 0.26, 0.35, 0.30, 0.24, 0.19],
+    },
+    1: {
+      possession: 50, shots: 6, territory: 50, momentum: 49,
+      avg_goal_prob: 0.25, avg_speed: 61, total_sprints: 199, avg_fatigue: 0.51,
+      player_fatigue: { 1: 0.41, 3: 0.57, 6: 0.48, 7: 0.54, 9: 0.44, 11: 0.49, 14: 0.53 },
+      speed_timeline: [43, 50, 58, 65, 62, 67, 64, 60, 55, 48],
+      goal_prob_timeline: [0.15, 0.20, 0.27, 0.37, 0.32, 0.25, 0.34, 0.29, 0.23, 0.18],
+    },
+  },
+  Match_005: {
+    0: {
+      possession: 54, shots: 7, territory: 52, momentum: 58,
+      avg_goal_prob: 0.28, avg_speed: 65, total_sprints: 218, avg_fatigue: 0.46,
+      player_fatigue: { 1: 0.36, 3: 0.52, 6: 0.44, 7: 0.57, 9: 0.34, 11: 0.45, 14: 0.48 },
+      speed_timeline: [44, 52, 60, 69, 66, 72, 69, 63, 57, 50],
+      goal_prob_timeline: [0.17, 0.22, 0.30, 0.42, 0.36, 0.28, 0.39, 0.33, 0.26, 0.21],
+    },
+    1: {
+      possession: 46, shots: 5, territory: 48, momentum: 42,
+      avg_goal_prob: 0.21, avg_speed: 59, total_sprints: 184, avg_fatigue: 0.56,
+      player_fatigue: { 1: 0.48, 3: 0.64, 6: 0.42, 7: 0.65, 9: 0.51, 11: 0.44, 14: 0.58 },
+      speed_timeline: [41, 47, 55, 62, 58, 63, 60, 56, 51, 44],
+      goal_prob_timeline: [0.13, 0.18, 0.24, 0.34, 0.29, 0.22, 0.31, 0.26, 0.20, 0.15],
+    },
+  },
+};
+
 /* ── Match Comparison data ── */
 export const COMPARE_MATCHES = [
   {

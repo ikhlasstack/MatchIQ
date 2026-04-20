@@ -41,10 +41,10 @@ export default function GoalProbChart({ data }: { data: GoalProbRow[] | null }) 
       {/* Insight pills — computed dynamically */}
       <div style={{ display: "flex", gap: "0.75rem", marginBottom: "1.5rem", flexWrap: "wrap" }}>
         <div style={{ padding: "4px 12px", borderRadius: "6px", background: "rgba(59,130,246,0.1)", border: "1px solid rgba(59,130,246,0.3)", fontSize: "0.78rem", color: "#60a5fa" }}>
-          Team 0 peak: {t0Peak.t0.toFixed(2)} @ frame {t0Peak.frame}
+          Team 1 peak: {t0Peak.t0.toFixed(2)} @ frame {t0Peak.frame}
         </div>
         <div style={{ padding: "4px 12px", borderRadius: "6px", background: "rgba(244,63,94,0.1)", border: "1px solid rgba(244,63,94,0.3)", fontSize: "0.78rem", color: "#fb7185" }}>
-          Team 1 peak: {t1Peak.t1.toFixed(2)} @ frame {t1Peak.frame}
+          Team 2 peak: {t1Peak.t1.toFixed(2)} @ frame {t1Peak.frame}
         </div>
       </div>
 
@@ -61,10 +61,10 @@ export default function GoalProbChart({ data }: { data: GoalProbRow[] | null }) 
               tickFormatter={v => `${Math.round(Number(v) * 100)}%`} axisLine={false} tickLine={false} />
             <Tooltip
               contentStyle={{ background: "#1a1a1a", border: "1px solid #2a2a2a", borderRadius: "0.5rem", fontSize: "0.8rem" }}
-              formatter={(v, name) => [`${(Number(v) * 100).toFixed(0)}%`, String(name) === "t0" ? "Team 0" : "Team 1"]}
+              formatter={(v, name) => [`${(Number(v) * 100).toFixed(0)}%`, String(name) === "t0" ? "Team 1" : "Team 2"]}
               labelFormatter={l => `Frame ${l}`}
             />
-            <Legend formatter={v => v === "t0" ? "Team 0" : "Team 1"}
+            <Legend formatter={v => v === "t0" ? "Team 1" : "Team 2"}
               wrapperStyle={{ fontSize: "0.8rem", paddingTop: "0.5rem" }} />
             <ReferenceLine y={0.5} stroke="#D4AF37" strokeDasharray="4 4" strokeOpacity={0.4}
               label={{ value: "High risk (50%)", fill: "#D4AF37", fontSize: 10, position: "right" }} />

@@ -41,6 +41,11 @@ Raw Video (MP4)
 │  GET  /results/fatigue|goal-prob|outcome|tracking   │
 │  GET  /video/tracked   →  final annotated MP4       │
 │  GET  /download/csv    →  ZIP of all output CSVs    │
+│  GET  /matches         →  list all saved matches    │
+│  GET  /matches/{id}    →  single match metadata     │
+│  GET  /matches/{id}/results/fatigue|goal-prob|      │
+│       outcome|tracking →  per-match result data     │
+│  GET  /matches/{id}/video → saved annotated MP4     │
 │                                                      │
 │  Pipeline stages (sequential, same thread):          │
 │   Phase 1 → Player_Track.py   (player_tracking())   │
@@ -48,6 +53,7 @@ Raw Video (MP4)
 │   Phase 3 → Fatigue.py (fatigue())                  │
 │             goal_prob.py (goal_prob())               │
 │   Phase 4 → Match_Outcome.py (Match_Outcome())      │
+│   Post-run → _save_match() archives all outputs     │
 └─────────────────────────────────────────────────────┘
       │                          │
       ▼                          ▼
@@ -57,6 +63,15 @@ Raw Video (MP4)
  1_fatigue_scores.csv
  1_goal_predictions.csv
  1_match_predictions.csv
+      │
+      ├──→ Saved_Matches/match_YYYYMMDD_HHMMSS/
+      │      ├── 1_tracking.csv
+      │      ├── 1_Movement_Features.csv
+      │      ├── 1_fatigue_scores.csv
+      │      ├── 1_goal_predictions.csv
+      │      ├── 1_match_predictions.csv
+      │      ├── tracked_output.mp4
+      │      └── meta.json  (id, name, date, duration, frames, players)
       │
       ▼
 ┌──────────────────────────────────────────────────────┐
@@ -77,6 +92,11 @@ Raw Video (MP4)
 **Models:**
 - `football-vgiqa-3njno/2`  (Roboflow YOLOv8) — detects Ball, Goalkeeper, Player, Referee
 - `football-field-detection-f07vi/14` (Roboflow YOLOv8) — detects 32 pitch keypoints
+
+**Models are pre-loaded at startup** (not re-loaded per run):
+`api_server.py` calls `_load_models()` once on `startup` via the FastAPI lifecycle event,
+storing `_player_model` and `_field_model` as module globals. These are passed directly to
+`player_tracking(player_model=..., field_model=...)` each run to avoid re-download overhead.
 
 **Process per frame:**
 1. Run player detection model (confidence threshold 0.3).
@@ -125,7 +145,7 @@ Per player per frame:
 - **Sprint flag**: speed > 75th percentile of that player's rolling speed history.
 
 **Output:** `Match_Data_CSV/1_Movement_Features.csv`
-Columns: frame, player_id, distance, speed, acceleration, is_sprint
+Columns: frame, player_id, team_id, distance, speed, acceleration, is_sprint
 
 ---
 
@@ -164,27 +184,53 @@ Columns: frame, player_id, team_id, distance_to_goal, angle_to_goal, goal_probab
 
 ### Phase 4 — Match Outcome  (Match_Outcome.py)
 
-**Inputs:** all four CSVs above.
+**Inputs:** `1_tracking.csv`, `1_goal_predictions.csv`, `1_Movement_Features.csv`
 
-Metrics (per team):
-- **Possession**: % of frames where team is closest to ball.
-- **Territory**: % of frames team spends in attacking half (Team 0: pitch_x > 52.5, Team 1: < 52.5).
-- **Shots**: frames where goal_probability ≥ 0.65.
-- **Danger**: mean goal probability.
-- **Momentum**: mean speed in last 20% of match frames.
+The module contains two components:
 
-Win probability:
+**`MatchOutcomeTracker` class** — live/per-frame tracker (used by api_server.py for
+real-time streaming updates if needed in future):
+- Maintains running counts for possession, territory, shots, danger, momentum via deques.
+- `process_frame(frame_id, detections, movement_by_player, goal_probabilities)` returns
+  a full outcome dict after every frame.
+- Shot deduplication: cooldown of 15 frames per player.
+
+**`Match_Outcome()` function** — batch CSV reader (called at end of pipeline):
+- Reads the three CSVs directly.
+- Normalises `pitch_x` from raw pixel range (1405.4–11780.6) to metres (0–105).
+- **Territory**: Team 0 attacking half = pitch_x_m > 52.5; Team 1 = pitch_x_m < 52.5.
+- **Momentum**: mean speed of last 20% of match frames (requires `team_id` column in
+  `1_Movement_Features.csv`).
+- Calls `calculate_match_outcome()` for win probabilities, writes
+  `Match_Data_CSV/1_match_predictions.csv`.
+
+**`calculate_match_outcome(possession, shots, territory, momentum, avg_danger)`:**
 - `strength = 0.25×shots + 0.25×danger + 0.20×possession + 0.15×territory + 0.15×momentum`
 - Sigmoid applied to (strength_0 − strength_1), then normalised to win0 + draw + win1 = 100%.
+- Draw probability: `max(0, 0.3 − |diff| × 2)`.
 
 **Output:** `Match_Data_CSV/1_match_predictions.csv`
+
+---
+
+### Post-Pipeline — Match Archiving  (_save_match in api_server.py)
+
+After Phase 4 completes, `_save_match(original_name)` is called:
+- Creates `Saved_Matches/match_YYYYMMDD_HHMMSS/` directory.
+- Copies all five CSVs and `tracked_output.mp4` into it.
+- Derives stats from tracking CSV: total frames, unique player count (excluding referee/ball),
+  duration string.
+- Writes `meta.json` with fields: id, name, date, saved_at, duration, frames, players.
+
+Saved matches are served via `/matches` and `/matches/{id}/*` endpoints, enabling the
+**Compare page** to load and compare any two previously processed matches.
 
 
 ## TECHNOLOGIES
 
 | Layer | Technology |
 |---|---|
-| Player detection | Roboflow `inference-gpu==1.2.1`, YOLOv8 models |
+| Player detection | Roboflow `inference==1.2.1` (CPU) / `inference-gpu==1.2.1` (GPU), YOLOv8 models |
 | Object tracking | `supervision==0.27.0.post2` ByteTrack |
 | Team classification | `sports` (Roboflow git) — SiglipEncoder + KMeans |
 | Pitch homography | `sports` ViewTransformer + SoccerPitchConfiguration |
@@ -192,7 +238,7 @@ Win probability:
 | Video I/O | `opencv-contrib-python==4.10.0.84`, `av==14.2.0` (PyAV) |
 | Data processing | `pandas==2.3.3`, `numpy==1.26.4`, `scipy==1.17.1` |
 | Backend API | `fastapi==0.115.14`, `uvicorn==0.44.0` |
-| Frontend | Next.js (latest breaking-changes version), React, TypeScript |
+| Frontend | Next.js (latest), React, TypeScript, Recharts, Framer Motion |
 | GPU runtime | NVIDIA GeForce GTX 1660 Super (6 GB), CUDA 12.1 |
 | Environment | WSL2 (Ubuntu), Python 3.12, venv at `/mnt/d/MatchIQ/venv/` |
 
@@ -201,19 +247,19 @@ Win probability:
 
 ```
 /mnt/d/MatchIQ/
-├── .env                        # ROBOFLOW_API_KEY, HF_TOKEN
+├── .env                        # ROBOFLOW_API_KEY, HF_TOKEN (inside Pipeline/)
 ├── .model_cache/               # Roboflow model weights (auto-downloaded)
-├── requirements2.txt           # Pinned dependencies (GPU + CPU sections)
+├── requirements.txt            # Pinned dependencies (CPU default; GPU section commented)
 ├── context.txt                 # This file
 ├── setup.sh
 │
 ├── Pipeline/
-│   ├── api_server.py           # FastAPI app + MJPEG streaming patch
+│   ├── api_server.py           # FastAPI app + MJPEG streaming + match archiving
 │   ├── Player_Track.py         # Phase 1 — detection, tracking, annotation
 │   ├── Movement_Features.py    # Phase 2 — speed, distance, sprint
 │   ├── Fatigue.py              # Phase 3a — fatigue scoring
 │   ├── goal_prob.py            # Phase 3b — goal probability
-│   ├── Match_Outcome.py        # Phase 4 — match outcome prediction
+│   ├── Match_Outcome.py        # Phase 4 — MatchOutcomeTracker + Match_Outcome() + calculate_match_outcome()
 │   ├── frame_pipeline.py       # Single-frame orchestrator (batch mode)
 │   └── main.py                 # Batch entry point
 │
@@ -229,6 +275,16 @@ Win probability:
 │   ├── 1_goal_predictions.csv
 │   └── 1_match_predictions.csv
 │
+├── Saved_Matches/
+│   └── match_YYYYMMDD_HHMMSS/  # One folder per processed match
+│       ├── 1_tracking.csv
+│       ├── 1_Movement_Features.csv
+│       ├── 1_fatigue_scores.csv
+│       ├── 1_goal_predictions.csv
+│       ├── 1_match_predictions.csv
+│       ├── tracked_output.mp4
+│       └── meta.json
+│
 ├── matchiq_website/            # Next.js frontend
 │   ├── app/
 │   │   ├── page.tsx            # Home
@@ -239,15 +295,19 @@ Win probability:
 │   │   ├── about/
 │   │   ├── gallery/
 │   │   └── contact/
+│   ├── lib/
+│   │   └── mockData.ts         # Static mock data (fallback when API unavailable)
 │   └── components/
 │       ├── demo/
 │       │   ├── DemoClient.tsx  # Upload, poll /status, tabs orchestration
 │       │   └── tabs/
 │       │       ├── VideoTab.tsx         # Live MJPEG canvas + custom post-video player
-│       │       ├── FatigueChart.tsx
-│       │       ├── GoalProbChart.tsx
-│       │       ├── MatchOutcomeChart.tsx
-│       │       └── PitchRadar.tsx
+│       │       ├── FatigueChart.tsx     # Real data + mock fallback, team filter
+│       │       ├── GoalProbChart.tsx    # Real data + mock fallback
+│       │       ├── MatchOutcomeChart.tsx # Real data + mock fallback, donut gauges
+│       │       └── PitchRadar.tsx       # Real data + mock fallback
+│       ├── compare/
+│       │   └── CompareClient.tsx  # Live API-driven cross-match team comparison
 │       └── analytics/
 │           └── AnalyticsClient.tsx
 │
@@ -264,7 +324,7 @@ POST /upload → saves as Test_Data/Testing.mp4
         │
 POST /run → launches _run_pipeline() in background thread
         │
-Phase 1: Player_Track.py
+Phase 1: Player_Track.py (receives pre-loaded models)
   ├── reads  Test_Data/Testing.mp4
   ├── writes Test_Data/tracked_output_raw.mp4  (mp4v via cv2.VideoWriter)
   │          └── _StreamingVideoWriter intercepts each frame → _frame_queue
@@ -274,22 +334,24 @@ Phase 1: Player_Track.py
         │
 Phase 2: Movement_Features.py
   ├── reads  1_tracking.csv
-  └── writes 1_Movement_Features.csv
+  └── writes 1_Movement_Features.csv  (includes team_id column)
         │
 Phase 3: Fatigue.py + goal_prob.py
   ├── reads  1_tracking.csv, 1_Movement_Features.csv
   └── writes 1_fatigue_scores.csv, 1_goal_predictions.csv
         │
 Phase 4: Match_Outcome.py
-  ├── reads  all four CSVs
+  ├── reads  1_tracking.csv, 1_goal_predictions.csv, 1_Movement_Features.csv
   └── writes 1_match_predictions.csv
+        │
+_save_match() → copies all outputs to Saved_Matches/match_YYYYMMDD_HHMMSS/
         │
 _set(done=True)  →  frontend polls /status, detects done
         │
 Frontend fetches:
   GET /results/fatigue    → JSON for FatigueChart
   GET /results/goal-prob  → JSON for GoalProbChart
-  GET /results/outcome    → JSON for MatchOutcomeChart
+  GET /results/outcome    → JSON (recomputed live from CSVs) for MatchOutcomeChart
   GET /results/tracking   → JSON for PitchRadar (last frame positions)
   GET /video/tracked      → H.264 MP4 file for custom video player
 ```
@@ -307,7 +369,19 @@ Frontend fetches:
   (0–105 × 0–68) via homographic projection.
 - **Full CSV download**: ZIP of all five output CSVs.
 - **Zero-config GPU/CPU fallback**: ONNXRuntime and PyTorch both fall back to CPU
-  if CUDA is unavailable.
+  if CUDA is unavailable. `requirements.txt` defaults to CPU (`inference==1.2.1`,
+  `onnxruntime==1.21.1`); GPU packages are commented out.
+- **Persistent match storage**: every completed pipeline run is archived under
+  `Saved_Matches/` with a timestamped folder and `meta.json`.
+- **Cross-match comparison** (`/compare` page): loads any two saved matches from the API
+  (`/matches`, `/matches/{id}/results/*`), computes per-team snapshots, and renders
+  head-to-head stat rows, fatigue bar charts, goal probability timelines, and a verdict card.
+- **Mock data fallback**: all demo tab components (`FatigueChart`, `GoalProbChart`,
+  `MatchOutcomeChart`, `PitchRadar`) render static mock data from `lib/mockData.ts`
+  when `data` prop is `null` (pre-pipeline state), switching to "● Live Data" badge
+  once real data is available.
+- **Model pre-loading**: Roboflow YOLOv8 models are downloaded and cached once at server
+  startup, not on each pipeline run, cutting per-run latency significantly.
 
 
 ## KNOWN ISSUES & CONSTRAINTS
@@ -317,8 +391,8 @@ Frontend fetches:
 - **Fix**: `api_server.py` top-of-file block uses `ctypes.RTLD_GLOBAL` to preload
   the venv's `libcudart.so.12` (12.1) and then `libcudnn.so.9` before any import,
   so ONNXRuntime finds the correct runtime.
-- Packages must be pinned: `nvidia-cuda-runtime-cu12==12.1.105`,
-  `nvidia-cudnn-cu12==9.1.0.70`, `onnxruntime-gpu==1.21.1`.
+- GPU packages: `inference-gpu==1.2.1`, `onnxruntime-gpu==1.21.1`,
+  `nvidia-cuda-runtime-cu12==12.1.105`, `nvidia-cudnn-cu12==9.1.0.70`.
 
 ### Video codec
 - `avc1` (H.264) codec is **not available** in this OpenCV build.
@@ -343,6 +417,17 @@ Frontend fetches:
 - The system processes one video at a time. Concurrent pipeline runs are not supported.
 - Input video is always saved as `Test_Data/Testing.mp4` (overwritten on each upload).
 
+### requirements.txt anomaly
+- The last line of `requirements.txt` contains a stray uvicorn command
+  (`uvicorn api_server:app --reload --port 8000`) — this is harmless but should be
+  removed before distributing the file.
+
+### /results/outcome live recomputation
+- The `GET /results/outcome` endpoint calls `_compute_outcome()` which re-reads and
+  re-calculates all stats from raw CSVs each time it is called. It does NOT read from
+  `1_match_predictions.csv`; it recalculates independently using the same formulas.
+  This ensures referees/ball are excluded from the live endpoint even if the CSV includes them.
+
 
 ## API REFERENCE
 
@@ -352,12 +437,19 @@ Frontend fetches:
 | POST | `/run` | Start pipeline in background thread |
 | GET | `/status` | `{phase, done, error, running, streaming}` |
 | GET | `/stream/frames` | MJPEG stream (multipart/x-mixed-replace) |
-| GET | `/results/fatigue` | Fatigue scores JSON |
-| GET | `/results/goal-prob` | Goal probability over time JSON |
-| GET | `/results/outcome` | Match outcome predictions JSON |
-| GET | `/results/tracking` | Last-frame player positions JSON |
+| GET | `/results/fatigue` | Fatigue scores JSON (referees/ball excluded) |
+| GET | `/results/goal-prob` | Goal probability over time JSON (sampled to ≤150 points) |
+| GET | `/results/outcome` | Match outcome JSON (live-recomputed from CSVs) |
+| GET | `/results/tracking` | Last-frame player positions JSON (pitch % coords) |
 | GET | `/video/tracked` | Final annotated H.264 MP4 (supports Range requests) |
 | GET | `/download/csv` | ZIP archive of all output CSVs |
+| GET | `/matches` | List all saved matches (newest first) |
+| GET | `/matches/{id}` | Single match metadata (meta.json) |
+| GET | `/matches/{id}/results/fatigue` | Saved match fatigue JSON |
+| GET | `/matches/{id}/results/goal-prob` | Saved match goal probability JSON |
+| GET | `/matches/{id}/results/outcome` | Saved match outcome JSON (recomputed) |
+| GET | `/matches/{id}/results/tracking` | Saved match tracking JSON |
+| GET | `/matches/{id}/video` | Saved match annotated MP4 |
 
 Backend runs on `http://localhost:8000`.
 Frontend runs on `http://localhost:3000`.
@@ -384,6 +476,7 @@ npm run dev
 | Fatigue scores | Match_Data_CSV/1_fatigue_scores.csv | CSV |
 | Goal predictions | Match_Data_CSV/1_goal_predictions.csv | CSV |
 | Match predictions | Match_Data_CSV/1_match_predictions.csv | CSV |
+| Archived match | Saved_Matches/match_YYYYMMDD_HHMMSS/ | Folder + meta.json |
 
 
 ## ASSUMPTIONS & LIMITATIONS
@@ -395,4 +488,7 @@ npm run dev
 - Fatigue scoring uses relative performance drop, not absolute physiological data.
 - The field detection model must detect enough keypoints to establish homography;
   if it fails, pitch_x/pitch_y are None and all pitch-coordinate features are skipped.
-- Player IDs are ByteTrack-local (per-video, not cross-match persistent).
+- Player IDs are ByteTrack-local (per-video, not cross-match persistent); the Compare
+  page therefore matches players by label string, only showing rows common to both matches.
+- `/results/outcome` and `/matches/{id}/results/outcome` recompute stats from raw CSVs
+  every call; `1_match_predictions.csv` is written for reference but not read by the API.

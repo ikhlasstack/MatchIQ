@@ -29,8 +29,8 @@ export default function PitchRadar({ data }: { data: TrackingRow[] | null }) {
       {/* Legend */}
       <div style={{ display: "flex", gap: "1.5rem", marginBottom: "1.25rem", flexWrap: "wrap" }}>
         {[
-          { color: "#3b82f6", label: "Team 0"  },
-          { color: "#f43f5e", label: "Team 1"  },
+          { color: "#3b82f6", label: "Team 1"  },
+          { color: "#f43f5e", label: "Team 2"  },
           { color: "#facc15", label: "Referee" },
           { color: "#ffffff", label: "Ball"    },
         ].map(({ color, label }) => (
@@ -114,8 +114,8 @@ export default function PitchRadar({ data }: { data: TrackingRow[] | null }) {
 
       <p style={{ fontSize: "0.75rem", color: "#444", marginTop: "0.75rem", textAlign: "center" }}>
         {isLive
-          ? `${players.filter(p => p.role === "player").length} players tracked · ${players.filter(p => p.team === 0).length} Team 0 · ${players.filter(p => p.team === 1).length} Team 1`
-          : "Positions captured at frame 80 — peak danger moment for Team 0"}
+          ? `${players.filter(p => p.role === "player").length} players tracked · ${players.filter(p => p.team === 0).length} Team 1 · ${players.filter(p => p.team === 1).length} Team 2`
+          : "Positions captured at frame 80 — peak danger moment for Team 1"}
       </p>
     </div>
   );

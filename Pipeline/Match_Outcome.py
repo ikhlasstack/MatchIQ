@@ -184,16 +184,22 @@ def Match_Outcome():
 
     #Shots
     SHOT_THRESHOLD = 0.65
+    SHOT_COOLDOWN  = 15   # minimum frames between shots from the same player
 
-    shots_df = goal_prob_df[goal_prob_df['goal_probability'] >= SHOT_THRESHOLD].copy()
+    high_danger = goal_prob_df[goal_prob_df['goal_probability'] >= SHOT_THRESHOLD].sort_values('frame').copy()
+    shots = {0: 0, 1: 0}
+    last_shot_frame: dict = {}
+    for _, row in high_danger.iterrows():
+        pid   = int(row['player_id'])
+        frame = int(row['frame'])
+        team  = int(row['team_id'])
+        if team not in (0, 1):
+            continue
+        if frame - last_shot_frame.get(pid, -SHOT_COOLDOWN) >= SHOT_COOLDOWN:
+            shots[team] += 1
+            last_shot_frame[pid] = frame
 
-    # Count shots per team
-    shots = {
-        0: len(shots_df[shots_df['team_id'] == 0]),
-        1: len(shots_df[shots_df['team_id'] == 1])
-    }
-
-    # Also get average danger level per team
+    # Average danger level per team (all frames, not just shots)
     avg_danger = {
         0: round(goal_prob_df[goal_prob_df['team_id'] == 0]['goal_probability'].mean(), 3),
         1: round(goal_prob_df[goal_prob_df['team_id'] == 1]['goal_probability'].mean(), 3)

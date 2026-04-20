@@ -8,19 +8,26 @@ function DonutGauge({ value, color, label }: { value: number; color: string; lab
   const data = [{ value }, { value: Math.max(0, 100 - value) }];
   return (
     <div style={{ textAlign: "center" }}>
-      <div style={{ width: 120, height: 120, margin: "0 auto" }}>
+      <div style={{ width: 140, height: 140, margin: "0 auto", position: "relative" }}>
         <ResponsiveContainer width="100%" height="100%">
           <PieChart>
-            <Pie data={data} cx="50%" cy="50%" innerRadius={40} outerRadius={55}
+            <Pie data={data} cx="50%" cy="50%" innerRadius={46} outerRadius={60}
               startAngle={90} endAngle={-270} dataKey="value" strokeWidth={0}>
               <Cell fill={color} />
               <Cell fill="#1a1a1a" />
             </Pie>
           </PieChart>
         </ResponsiveContainer>
+        {/* Centered value inside the ring */}
+        <div style={{
+          position: "absolute", inset: 0,
+          display: "flex", alignItems: "center", justifyContent: "center",
+          pointerEvents: "none",
+        }}>
+          <span style={{ fontSize: "1.25rem", fontWeight: 900, color }}>{value}%</span>
+        </div>
       </div>
-      <p style={{ fontSize: "1.5rem", fontWeight: 900, color, marginTop: "-1.25rem" }}>{value}%</p>
-      <p style={{ fontSize: "0.8rem", color: "#888", marginTop: "0.25rem" }}>{label}</p>
+      <p style={{ fontSize: "0.82rem", color: "#888", marginTop: "0.6rem" }}>{label}</p>
     </div>
   );
 }
@@ -76,10 +83,10 @@ export default function MatchOutcomeChart({ data }: { data: OutcomeData | null }
       ) : (
         <>
           {/* Three gauges */}
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "2rem", marginBottom: "2.5rem" }}>
-            <DonutGauge value={d.winA} color="#3b82f6" label="Team 0 Win" />
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "2rem", marginBottom: "3rem" }}>
+            <DonutGauge value={d.winA} color="#3b82f6" label="Team 1 Win" />
             <DonutGauge value={d.draw} color="#6b7280" label="Draw"       />
-            <DonutGauge value={d.winB} color="#f43f5e" label="Team 1 Win" />
+            <DonutGauge value={d.winB} color="#f43f5e" label="Team 2 Win" />
           </div>
 
           {/* Win probability bar */}
@@ -97,8 +104,8 @@ export default function MatchOutcomeChart({ data }: { data: OutcomeData | null }
               <thead>
                 <tr style={{ background: "#1a1a1a" }}>
                   <th style={{ padding: "0.75rem 1rem", textAlign: "left", color: "#555", fontWeight: 600, fontSize: "0.75rem", textTransform: "uppercase", letterSpacing: "0.08em" }}>Metric</th>
-                  <th style={{ padding: "0.75rem 1rem", textAlign: "center", color: "#3b82f6", fontWeight: 700, fontSize: "0.75rem" }}>Team 0</th>
-                  <th style={{ padding: "0.75rem 1rem", textAlign: "center", color: "#f43f5e", fontWeight: 700, fontSize: "0.75rem" }}>Team 1</th>
+                  <th style={{ padding: "0.75rem 1rem", textAlign: "center", color: "#3b82f6", fontWeight: 700, fontSize: "0.75rem" }}>Team 1</th>
+                  <th style={{ padding: "0.75rem 1rem", textAlign: "center", color: "#f43f5e", fontWeight: 700, fontSize: "0.75rem" }}>Team 2</th>
                 </tr>
               </thead>
               <tbody>

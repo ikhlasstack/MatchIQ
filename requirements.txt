@@ -8,7 +8,7 @@
 #   pip install torch torchvision
 #
 # Then install the rest:
-#   pip install -r requirements2.txt
+#   pip install -r .txt
 
 numpy==1.26.4
 opencv-contrib-python==4.10.0.84
@@ -25,14 +25,13 @@ python-dotenv==1.0.1
 websocket-client==1.9.0
 
 # ── GPU ──────────────────────────────────────────────────────────────────────
-inference-gpu==1.2.1
-onnxruntime-gpu==1.21.1
-nvidia-cuda-runtime-cu12==12.1.105
-nvidia-cudnn-cu12==9.1.0.70
+# inference-gpu==1.2.1
+# onnxruntime-gpu==1.21.1
+# nvidia-cuda-runtime-cu12==12.1.105
+# nvidia-cudnn-cu12==9.1.0.70
 
 # ── CPU (swap with GPU section above) ────────────────────────────────────────
-# inference==1.2.1
-# onnxruntime==1.21.1
+inference==1.2.1
+onnxruntime==1.21.1
 
 uvicorn api_server:app --reload --port 8000
-

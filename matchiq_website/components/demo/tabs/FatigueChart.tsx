@@ -66,7 +66,7 @@ export default function FatigueChart({ data }: { data: FatigueRow[] | null }) {
                 background: teamFilter === t ? "rgba(212,175,55,0.12)" : "transparent",
                 color:      teamFilter === t ? "#D4AF37" : "#888",
               }}>
-              {t === "all" ? "All" : `Team ${t}`}
+              {t === "all" ? "All" : `Team ${(t as number) + 1}`}
             </button>
           ))}
         </div>
@@ -90,18 +90,18 @@ export default function FatigueChart({ data }: { data: FatigueRow[] | null }) {
           No fatigue data available
         </p>
       ) : (
-        <ResponsiveContainer width="100%" height={320}>
-          <BarChart data={chartData} layout="vertical" margin={{ left: 8, right: 40, top: 0, bottom: 0 }}>
+        <ResponsiveContainer width="100%" height={Math.max(320, chartData.length * 36 + 20)}>
+          <BarChart data={chartData} layout="vertical" margin={{ left: 8, right: 48, top: 4, bottom: 4 }}>
             <XAxis type="number" domain={[0, 100]} tick={{ fill: "#555", fontSize: 11 }}
               tickFormatter={v => `${v}%`} axisLine={false} tickLine={false} />
-            <YAxis type="category" dataKey="label" tick={{ fill: "#aaa", fontSize: 12 }} width={80}
+            <YAxis type="category" dataKey="label" tick={{ fill: "#aaa", fontSize: 12 }} width={50}
               axisLine={false} tickLine={false} />
             <Tooltip
               cursor={{ fill: "rgba(255,255,255,0.03)" }}
               contentStyle={{ background: "#1a1a1a", border: "1px solid #2a2a2a", borderRadius: "0.5rem", fontSize: "0.8rem" }}
               formatter={(v) => [`${Number(v)}%`, "Fatigue"]}
             />
-            <Bar dataKey="score" radius={[0, 4, 4, 0]} barSize={16}>
+            <Bar dataKey="score" radius={[0, 4, 4, 0]} barSize={18}>
               {chartData.map((entry, i) => (
                 <Cell key={i} fill={fatigueColor(entry.level)} />
               ))}
