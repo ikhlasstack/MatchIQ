@@ -6,6 +6,7 @@ import {
 import { useState } from "react";
 import { FATIGUE_DATA } from "@/lib/mockData";
 import type { FatigueRow } from "../DemoClient";
+import type { NamesMap } from "../PlayerNamingModal";
 
 /* Handles both real pipeline labels (LOW/MEDIUM/HIGH)
    and mock labels (LOW/MODERATE/HIGH/CRITICAL) */
@@ -33,14 +34,26 @@ function Skeleton() {
   );
 }
 
-export default function FatigueChart({ data }: { data: FatigueRow[] | null }) {
+export default function FatigueChart({ data, names }: { data: FatigueRow[] | null; names?: NamesMap }) {
   const [teamFilter, setTeamFilter] = useState<"all" | 0 | 1>("all");
 
   /* Use real API data when available, fall back to mock */
   const source: FatigueRow[] = data ?? FATIGUE_DATA;
 
+  /* Apply player name overrides */
+  const resolvedSource = source.map(row => {
+    const rawId = row.label.replace(/\D/g, "");
+    const name  = names?.players?.[rawId];
+    const tName = names?.teams?.[String(row.team)];
+    return {
+      ...row,
+      label: name ? name : row.label,
+      _teamLabel: tName,
+    };
+  });
+
   const chartData = (
-    teamFilter === "all" ? source : source.filter(d => d.team === teamFilter)
+    teamFilter === "all" ? resolvedSource : resolvedSource.filter(d => d.team === teamFilter)
   ).slice().reverse();
 
   return (
@@ -66,7 +79,7 @@ export default function FatigueChart({ data }: { data: FatigueRow[] | null }) {
                 background: teamFilter === t ? "rgba(212,175,55,0.12)" : "transparent",
                 color:      teamFilter === t ? "#D4AF37" : "#888",
               }}>
-              {t === "all" ? "All" : `Team ${(t as number) + 1}`}
+              {t === "all" ? "All" : (names?.teams?.[String(t)] || `Team ${(t as number) + 1}`)}
             </button>
           ))}
         </div>

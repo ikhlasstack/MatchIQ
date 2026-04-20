@@ -10,6 +10,7 @@ import GoalProbChart from "./tabs/GoalProbChart";
 import MatchOutcomeChart from "./tabs/MatchOutcomeChart";
 import PitchRadar from "./tabs/PitchRadar";
 import VideoTab from "./tabs/VideoTab";
+import PlayerNamingModal, { type NamesMap } from "./PlayerNamingModal";
 
 const API = "http://localhost:8000";
 
@@ -181,8 +182,11 @@ export default function DemoClient() {
   const [goalProbData, setGoalProbData] = useState<GoalProbRow[] | null>(null);
   const [outcomeData, setOutcomeData] = useState<OutcomeData | null>(null);
   const [trackingData, setTrackingData] = useState<TrackingRow[] | null>(null);
-  const [isStreaming, setIsStreaming] = useState(false);  // true while MJPEG frames are live
-  const [serverPhase, setServerPhase] = useState(0);
+  const [isStreaming,   setIsStreaming]   = useState(false);
+  const [serverPhase,   setServerPhase]   = useState(0);
+  const [savedMatchId,  setSavedMatchId]  = useState<string | null>(null);
+  const [showNaming,    setShowNaming]    = useState(false);
+  const [names,         setNames]         = useState<NamesMap>({ players: {}, teams: {} });
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -231,6 +235,10 @@ export default function DemoClient() {
           clearInterval(pollRef.current!);
           setStage("done");
           await fetchResults();
+          if (data.match_id) {
+            setSavedMatchId(data.match_id);
+            setShowNaming(true);
+          }
         }
       } catch (_) { /* server might still be starting */ }
     }, 2500);
@@ -271,10 +279,20 @@ export default function DemoClient() {
     if (pollRef.current) clearInterval(pollRef.current);
     setStage("idle"); setDoneSteps(0); setFileName(""); setErrorMsg("");
     setFatigueData(null); setGoalProbData(null); setOutcomeData(null); setTrackingData(null);
+    setSavedMatchId(null); setShowNaming(false); setNames({ players: {}, teams: {} });
   };
 
   return (
     <div style={{ minHeight: "100vh", background: "#0a0a0a", paddingTop: "64px" }}>
+      {showNaming && savedMatchId && (
+        <PlayerNamingModal
+          matchId={savedMatchId}
+          fatigueData={fatigueData}
+          trackingData={trackingData}
+          onClose={() => setShowNaming(false)}
+          onSaved={saved => { setNames(saved); setShowNaming(false); }}
+        />
+      )}
       {/* Page header */}
       <div style={{ borderBottom: "1px solid #1a1a1a", padding: "1.5rem 0" }}>
         <div className="wrap">
@@ -311,8 +329,17 @@ export default function DemoClient() {
 
           {/* ── Right Panel ── */}
           <div style={{ display: "flex", flexDirection: "column", gap: "1.25rem" }}>
+            {/* Edit Names button — same style as Gallery header button */}
+            {stage === "done" && savedMatchId && (
+              <button
+                onClick={() => setShowNaming(true)}
+                style={{ display: "flex", alignItems: "center", gap: "0.5rem", padding: "0.6rem 1.2rem", borderRadius: "0.75rem", background: "transparent", border: "1px solid rgba(212,175,55,0.35)", color: "#D4AF37", fontSize: "0.85rem", fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap", alignSelf: "flex-start" }}>
+                ✏ Edit Names
+              </button>
+            )}
+
             {/* Tabs */}
-            <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+            <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", alignItems: "center" }}>
               {TABS.map(t => (
                 <button key={t.id} onClick={() => setActiveTab(t.id)}
                   style={{
@@ -335,10 +362,10 @@ export default function DemoClient() {
                   initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0, y: -8 }} transition={{ duration: 0.2 }}>
                   {activeTab === "video" && <VideoTab done={stage === "done"} isStreaming={isStreaming} phase={serverPhase} />}
-                  {activeTab === "fatigue" && <FatigueChart data={fatigueData} />}
-                  {activeTab === "goal" && <GoalProbChart data={goalProbData} />}
-                  {activeTab === "outcome" && <MatchOutcomeChart data={outcomeData} />}
-                  {activeTab === "radar" && <PitchRadar data={trackingData} />}
+                  {activeTab === "fatigue" && <FatigueChart data={fatigueData} names={names} />}
+                  {activeTab === "goal" && <GoalProbChart data={goalProbData} names={names} />}
+                  {activeTab === "outcome" && <MatchOutcomeChart data={outcomeData} names={names} />}
+                  {activeTab === "radar" && <PitchRadar data={trackingData} names={names} />}
                 </motion.div>
               </AnimatePresence>
             </div>

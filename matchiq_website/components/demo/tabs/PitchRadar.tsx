@@ -2,11 +2,12 @@
 
 import { PITCH_PLAYERS } from "@/lib/mockData";
 import type { TrackingRow } from "../DemoClient";
+import type { NamesMap } from "../PlayerNamingModal";
 
 const TEAM_COLORS: Record<number, string> = { 0: "#3b82f6", 1: "#f43f5e" };
 function playerColor(team: number) { return TEAM_COLORS[team] ?? "#facc15"; }
 
-export default function PitchRadar({ data }: { data: TrackingRow[] | null }) {
+export default function PitchRadar({ data, names }: { data: TrackingRow[] | null; names?: NamesMap }) {
   /* Use real tracking data if available, else mock */
   const players = data ?? PITCH_PLAYERS;
   const isLive  = data !== null;
@@ -29,8 +30,8 @@ export default function PitchRadar({ data }: { data: TrackingRow[] | null }) {
       {/* Legend */}
       <div style={{ display: "flex", gap: "1.5rem", marginBottom: "1.25rem", flexWrap: "wrap" }}>
         {[
-          { color: "#3b82f6", label: "Team 1"  },
-          { color: "#f43f5e", label: "Team 2"  },
+          { color: "#3b82f6", label: names?.teams?.["0"] || "Team 1"  },
+          { color: "#f43f5e", label: names?.teams?.["1"] || "Team 2"  },
           { color: "#facc15", label: "Referee" },
           { color: "#ffffff", label: "Ball"    },
         ].map(({ color, label }) => (
@@ -88,8 +89,10 @@ export default function PitchRadar({ data }: { data: TrackingRow[] | null }) {
               );
             }
 
-            const color = playerColor(p.team);
-            const label = p.id > 0 ? String(p.id <= 11 ? p.id : p.id - 11) : "?";
+            const color    = playerColor(p.team);
+            const assigned = names?.players?.[String(p.id)];
+            /* Show first 3 chars of assigned name, else numeric ID */
+            const label    = assigned ? assigned.slice(0, 3) : (p.id > 0 ? String(p.id <= 11 ? p.id : p.id - 11) : "?");
 
             return (
               <g key={`p-${p.id}-${idx}`}>

@@ -6,6 +6,7 @@ import {
 } from "recharts";
 import { GOAL_PROB_DATA } from "@/lib/mockData";
 import type { GoalProbRow } from "../DemoClient";
+import type { NamesMap } from "../PlayerNamingModal";
 
 function Skeleton() {
   return (
@@ -15,8 +16,10 @@ function Skeleton() {
   );
 }
 
-export default function GoalProbChart({ data }: { data: GoalProbRow[] | null }) {
+export default function GoalProbChart({ data, names }: { data: GoalProbRow[] | null; names?: NamesMap }) {
   const source = data ?? GOAL_PROB_DATA;
+  const t1Name = names?.teams?.["0"] || "Team 1";
+  const t2Name = names?.teams?.["1"] || "Team 2";
 
   /* Compute peaks from whichever data source we're using */
   const t0Peak = source.reduce((a, b) => b.t0 > a.t0 ? b : a, source[0] ?? { t0: 0, t1: 0, frame: 0 });
@@ -41,10 +44,10 @@ export default function GoalProbChart({ data }: { data: GoalProbRow[] | null }) 
       {/* Insight pills — computed dynamically */}
       <div style={{ display: "flex", gap: "0.75rem", marginBottom: "1.5rem", flexWrap: "wrap" }}>
         <div style={{ padding: "4px 12px", borderRadius: "6px", background: "rgba(59,130,246,0.1)", border: "1px solid rgba(59,130,246,0.3)", fontSize: "0.78rem", color: "#60a5fa" }}>
-          Team 1 peak: {t0Peak.t0.toFixed(2)} @ frame {t0Peak.frame}
+          {t1Name} peak: {t0Peak.t0.toFixed(2)} @ frame {t0Peak.frame}
         </div>
         <div style={{ padding: "4px 12px", borderRadius: "6px", background: "rgba(244,63,94,0.1)", border: "1px solid rgba(244,63,94,0.3)", fontSize: "0.78rem", color: "#fb7185" }}>
-          Team 2 peak: {t1Peak.t1.toFixed(2)} @ frame {t1Peak.frame}
+          {t2Name} peak: {t1Peak.t1.toFixed(2)} @ frame {t1Peak.frame}
         </div>
       </div>
 
@@ -61,10 +64,10 @@ export default function GoalProbChart({ data }: { data: GoalProbRow[] | null }) 
               tickFormatter={v => `${Math.round(Number(v) * 100)}%`} axisLine={false} tickLine={false} />
             <Tooltip
               contentStyle={{ background: "#1a1a1a", border: "1px solid #2a2a2a", borderRadius: "0.5rem", fontSize: "0.8rem" }}
-              formatter={(v, name) => [`${(Number(v) * 100).toFixed(0)}%`, String(name) === "t0" ? "Team 1" : "Team 2"]}
+              formatter={(v, name) => [`${(Number(v) * 100).toFixed(0)}%`, String(name) === "t0" ? t1Name : t2Name]}
               labelFormatter={l => `Frame ${l}`}
             />
-            <Legend formatter={v => v === "t0" ? "Team 1" : "Team 2"}
+            <Legend formatter={v => v === "t0" ? t1Name : t2Name}
               wrapperStyle={{ fontSize: "0.8rem", paddingTop: "0.5rem" }} />
             <ReferenceLine y={0.5} stroke="#D4AF37" strokeDasharray="4 4" strokeOpacity={0.4}
               label={{ value: "High risk (50%)", fill: "#D4AF37", fontSize: 10, position: "right" }} />

@@ -3,6 +3,7 @@
 import { PieChart, Pie, Cell, ResponsiveContainer } from "recharts";
 import { MATCH_OUTCOME } from "@/lib/mockData";
 import type { OutcomeData } from "../DemoClient";
+import type { NamesMap } from "../PlayerNamingModal";
 
 function DonutGauge({ value, color, label }: { value: number; color: string; label: string }) {
   const data = [{ value }, { value: Math.max(0, 100 - value) }];
@@ -46,8 +47,11 @@ function Skeleton() {
   );
 }
 
-export default function MatchOutcomeChart({ data }: { data: OutcomeData | null }) {
+export default function MatchOutcomeChart({ data, names }: { data: OutcomeData | null; names?: NamesMap }) {
   /* Use real data if available, else fall back to mock */
+  const t1Name = names?.teams?.["0"] || "Team 1";
+  const t2Name = names?.teams?.["1"] || "Team 2";
+
   const d: OutcomeData = data ?? {
     winA:       MATCH_OUTCOME.winA,
     draw:       MATCH_OUTCOME.draw,
@@ -84,9 +88,9 @@ export default function MatchOutcomeChart({ data }: { data: OutcomeData | null }
         <>
           {/* Three gauges */}
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "2rem", marginBottom: "3rem" }}>
-            <DonutGauge value={d.winA} color="#3b82f6" label="Team 1 Win" />
-            <DonutGauge value={d.draw} color="#6b7280" label="Draw"       />
-            <DonutGauge value={d.winB} color="#f43f5e" label="Team 2 Win" />
+            <DonutGauge value={d.winA} color="#3b82f6" label={`${t1Name} Win`} />
+            <DonutGauge value={d.draw} color="#6b7280" label="Draw"            />
+            <DonutGauge value={d.winB} color="#f43f5e" label={`${t2Name} Win`} />
           </div>
 
           {/* Win probability bar */}
@@ -104,8 +108,8 @@ export default function MatchOutcomeChart({ data }: { data: OutcomeData | null }
               <thead>
                 <tr style={{ background: "#1a1a1a" }}>
                   <th style={{ padding: "0.75rem 1rem", textAlign: "left", color: "#555", fontWeight: 600, fontSize: "0.75rem", textTransform: "uppercase", letterSpacing: "0.08em" }}>Metric</th>
-                  <th style={{ padding: "0.75rem 1rem", textAlign: "center", color: "#3b82f6", fontWeight: 700, fontSize: "0.75rem" }}>Team 1</th>
-                  <th style={{ padding: "0.75rem 1rem", textAlign: "center", color: "#f43f5e", fontWeight: 700, fontSize: "0.75rem" }}>Team 2</th>
+                  <th style={{ padding: "0.75rem 1rem", textAlign: "center", color: "#3b82f6", fontWeight: 700, fontSize: "0.75rem" }}>{t1Name}</th>
+                  <th style={{ padding: "0.75rem 1rem", textAlign: "center", color: "#f43f5e", fontWeight: 700, fontSize: "0.75rem" }}>{t2Name}</th>
                 </tr>
               </thead>
               <tbody>

@@ -9,6 +9,7 @@ import GoalProbChart from "@/components/demo/tabs/GoalProbChart";
 import MatchOutcomeChart from "@/components/demo/tabs/MatchOutcomeChart";
 import PitchRadar from "@/components/demo/tabs/PitchRadar";
 import VideoTab from "@/components/demo/tabs/VideoTab";
+import PlayerNamingModal, { type NamesMap } from "@/components/demo/PlayerNamingModal";
 import type { FatigueRow, GoalProbRow, OutcomeData, TrackingRow } from "@/components/demo/DemoClient";
 
 const API = "http://localhost:8000";
@@ -42,6 +43,8 @@ export default function MatchResultsClient({ matchId }: { matchId: string }) {
   const [trackingData, setTrackingData] = useState<TrackingRow[] | null>(null);
   const [loading,      setLoading]      = useState(true);
   const [error,        setError]        = useState<string | null>(null);
+  const [names,        setNames]        = useState<NamesMap>({ players: {}, teams: {} });
+  const [showNaming,   setShowNaming]   = useState(false);
 
   const videoUrl    = `${API}/matches/${matchId}/video`;
   const downloadUrl = `${API}/matches/${matchId}/video`;
@@ -49,7 +52,7 @@ export default function MatchResultsClient({ matchId }: { matchId: string }) {
   useEffect(() => {
     async function load() {
       try {
-        const [metaRes, fat, goal, out, track] = await Promise.all([
+        const [metaRes, fat, goal, out, track, savedNames] = await Promise.all([
           fetch(`${API}/matches/${matchId}`).then(r => {
             if (!r.ok) throw new Error("Match not found");
             return r.json();
@@ -58,12 +61,14 @@ export default function MatchResultsClient({ matchId }: { matchId: string }) {
           fetch(`${API}/matches/${matchId}/results/goal-prob`).then(r => r.json()),
           fetch(`${API}/matches/${matchId}/results/outcome`).then(r => r.json()),
           fetch(`${API}/matches/${matchId}/results/tracking`).then(r => r.json()),
+          fetch(`${API}/matches/${matchId}/names`).then(r => r.ok ? r.json() : { players: {}, teams: {} }),
         ]);
         setMeta(metaRes);
         setFatigueData(fat);
         setGoalProbData(goal);
         setOutcomeData(out);
         setTrackingData(track);
+        setNames(savedNames);
       } catch (e: unknown) {
         setError(e instanceof Error ? e.message : "Could not load match data. Is the backend running?");
       } finally {
@@ -97,6 +102,15 @@ export default function MatchResultsClient({ matchId }: { matchId: string }) {
 
   return (
     <div style={{ minHeight: "100vh", background: "#0a0a0a", paddingTop: "64px" }}>
+      {showNaming && (
+        <PlayerNamingModal
+          matchId={matchId}
+          fatigueData={fatigueData}
+          trackingData={trackingData}
+          onClose={() => setShowNaming(false)}
+          onSaved={saved => { setNames(saved); setShowNaming(false); }}
+        />
+      )}
 
       {/* Header */}
       <div style={{ background: "#111", borderBottom: "1px solid #1a1a1a" }}>
@@ -129,13 +143,20 @@ export default function MatchResultsClient({ matchId }: { matchId: string }) {
               )}
             </div>
 
-            {/* Download button */}
-            <a
-              href={downloadUrl}
-              download={`${meta?.name ?? matchId}_tracked.mp4`}
-              style={{ display: "flex", alignItems: "center", gap: "0.5rem", padding: "0.6rem 1.2rem", borderRadius: "0.75rem", background: "rgba(212,175,55,0.1)", border: "1px solid rgba(212,175,55,0.35)", color: "#D4AF37", fontSize: "0.85rem", fontWeight: 700, cursor: "pointer", textDecoration: "none", whiteSpace: "nowrap", alignSelf: "flex-start" }}>
-              <Download size={14} /> Download Video
-            </a>
+            <div style={{ display: "flex", gap: "0.75rem", alignItems: "center", flexWrap: "wrap" }}>
+              <button
+                onClick={() => setShowNaming(true)}
+                style={{ display: "flex", alignItems: "center", gap: "0.5rem", padding: "0.6rem 1.2rem", borderRadius: "0.75rem", background: "transparent", border: "1px solid rgba(212,175,55,0.35)", color: "#D4AF37", fontSize: "0.85rem", fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap" }}>
+                ✏ Edit Names
+              </button>
+              {/* Download button */}
+              <a
+                href={downloadUrl}
+                download={`${meta?.name ?? matchId}_tracked.mp4`}
+                style={{ display: "flex", alignItems: "center", gap: "0.5rem", padding: "0.6rem 1.2rem", borderRadius: "0.75rem", background: "rgba(212,175,55,0.1)", border: "1px solid rgba(212,175,55,0.35)", color: "#D4AF37", fontSize: "0.85rem", fontWeight: 700, cursor: "pointer", textDecoration: "none", whiteSpace: "nowrap" }}>
+                <Download size={14} /> Download Video
+              </a>
+            </div>
           </div>
         </div>
       </div>
@@ -161,10 +182,10 @@ export default function MatchResultsClient({ matchId }: { matchId: string }) {
             exit={{ opacity: 0, y: -8 }}
             transition={{ duration: 0.2 }}>
             {activeTab === "video"   && <VideoTab done={true} isStreaming={false} phase={4} videoUrl={videoUrl} />}
-            {activeTab === "fatigue" && <FatigueChart data={fatigueData} />}
-            {activeTab === "goal"    && <GoalProbChart data={goalProbData} />}
-            {activeTab === "outcome" && <MatchOutcomeChart data={outcomeData} />}
-            {activeTab === "radar"   && <PitchRadar data={trackingData} />}
+            {activeTab === "fatigue" && <FatigueChart data={fatigueData} names={names} />}
+            {activeTab === "goal"    && <GoalProbChart data={goalProbData} names={names} />}
+            {activeTab === "outcome" && <MatchOutcomeChart data={outcomeData} names={names} />}
+            {activeTab === "radar"   && <PitchRadar data={trackingData} names={names} />}
           </motion.div>
         </AnimatePresence>
       </div>

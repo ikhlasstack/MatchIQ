@@ -195,8 +195,9 @@ function StatRow({
 }
 
 /* ── Team header card ─────────────────────────────────────── */
-function TeamHeader({ team, stats }: {
+function TeamHeader({ team, name, stats }: {
   team: 0 | 1;
+  name: string;
   stats: { possession: number; shots: number; avgFatigue: number };
 }) {
   const color = team === 0 ? T0 : T1;
@@ -215,10 +216,10 @@ function TeamHeader({ team, stats }: {
         textAlign: "center",
       }}
     >
-      <div style={{ width: "3rem", height: "3rem", borderRadius: "50%", background: `${color}22`, border: `2px solid ${color}`, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 0.75rem", fontSize: "1rem", fontWeight: 900, color }}>
-        T{team}
+      <div style={{ width: "3rem", height: "3rem", borderRadius: "50%", background: `${color}22`, border: `2px solid ${color}`, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 0.75rem", fontSize: "0.75rem", fontWeight: 900, color }}>
+        {name.slice(0, 3).toUpperCase()}
       </div>
-      <h2 style={{ fontSize: "1.1rem", fontWeight: 800 }}>Team {team}</h2>
+      <h2 style={{ fontSize: "1.1rem", fontWeight: 800 }}>{name}</h2>
       {wins && (
         <span style={{ display: "inline-block", marginTop: "0.4rem", padding: "2px 10px", borderRadius: "999px", fontSize: "0.7rem", fontWeight: 700, background: `${color}22`, border: `1px solid ${color}55`, color }}>
           DOMINANT
@@ -257,15 +258,21 @@ function EmptyState({ loading, error }: { loading: boolean; error: string | null
   );
 }
 
+interface NamesMap { players: Record<string, string>; teams: Record<string, string>; }
+
 /* ── main ─────────────────────────────────────────────────── */
 export default function AnalyticsClient() {
   const [matches,   setMatches]   = useState<MatchMeta[]>([]);
   const [matchId,   setMatchId]   = useState<string>("");
   const [analytics, setAnalytics] = useState<AnalyticsState | null>(null);
+  const [names,     setNames]     = useState<NamesMap>({ players: {}, teams: {} });
   const [loading,   setLoading]   = useState(true);
   const [fetching,  setFetching]  = useState(false);
   const [error,     setError]     = useState<string | null>(null);
   const [timeline,  setTimeline]  = useState<"possession" | "momentum">("possession");
+
+  const t0Name = names.teams["0"] || "Team 1";
+  const t1Name = names.teams["1"] || "Team 2";
 
   /* Load match list */
   useEffect(() => {
@@ -279,24 +286,27 @@ export default function AnalyticsClient() {
       .finally(() => setLoading(false));
   }, []);
 
-  /* Fetch match data whenever selection changes */
+  /* Fetch match data + names whenever selection changes */
   useEffect(() => {
     if (!matchId) return;
     setFetching(true);
     setError(null);
     setAnalytics(null);
+    setNames({ players: {}, teams: {} });
 
     Promise.all([
       fetch(`${API}/matches/${matchId}/results/outcome`).then(r => r.json()),
       fetch(`${API}/matches/${matchId}/results/fatigue`).then(r => r.json()),
       fetch(`${API}/matches/${matchId}/results/goal-prob`).then(r => r.json()),
+      fetch(`${API}/matches/${matchId}/names`).then(r => r.ok ? r.json() : { players: {}, teams: {} }),
     ])
-      .then(([outcome, fatigue, goalProb]) => {
+      .then(([outcome, fatigue, goalProb, savedNames]) => {
         if (!outcome || Object.keys(outcome).length === 0) {
           setError("Match outcome data unavailable for this match.");
           return;
         }
         setAnalytics(buildAnalytics(outcome as OutcomeData, fatigue as FatigueRow[], goalProb as GoalProbRow[]));
+        setNames(savedNames as NamesMap);
       })
       .catch(() => setError("Failed to load match data. Check that the backend is running."))
       .finally(() => setFetching(false));
@@ -356,8 +366,8 @@ export default function AnalyticsClient() {
           <>
             {/* ── Team headers ── */}
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1.25rem" }}>
-              <TeamHeader team={0} stats={analytics.stats.t0} />
-              <TeamHeader team={1} stats={analytics.stats.t1} />
+              <TeamHeader team={0} name={t0Name} stats={analytics.stats.t0} />
+              <TeamHeader team={1} name={t1Name} stats={analytics.stats.t1} />
             </div>
 
             {/* ── Radar chart ── */}
@@ -381,9 +391,9 @@ export default function AnalyticsClient() {
                     tick={{ fill: "#888", fontSize: 12, fontWeight: 600 }} />
                   <PolarRadiusAxis angle={90} domain={[0, 100]}
                     tick={{ fill: "#444", fontSize: 10 }} axisLine={false} />
-                  <Radar name="Team 0" dataKey="t0" stroke={T0} fill={T0} fillOpacity={0.2} strokeWidth={2}
+                  <Radar name={t0Name} dataKey="t0" stroke={T0} fill={T0} fillOpacity={0.2} strokeWidth={2}
                     dot={{ r: 4, fill: T0, strokeWidth: 0 }} />
-                  <Radar name="Team 1" dataKey="t1" stroke={T1} fill={T1} fillOpacity={0.15} strokeWidth={2}
+                  <Radar name={t1Name} dataKey="t1" stroke={T1} fill={T1} fillOpacity={0.15} strokeWidth={2}
                     dot={{ r: 4, fill: T1, strokeWidth: 0 }} />
                   <Legend wrapperStyle={{ fontSize: "0.85rem", paddingTop: "1rem" }} />
                   <Tooltip
@@ -407,7 +417,7 @@ export default function AnalyticsClient() {
                 </p>
                 <h3 style={{ fontSize: "1.1rem", fontWeight: 700 }}>Full Stats Breakdown</h3>
                 <div style={{ display: "flex", gap: "1.5rem", marginTop: "0.75rem" }}>
-                  {[{ color: T0, label: "Team 0" }, { color: T1, label: "Team 1" }].map(({ color, label }) => (
+                  {[{ color: T0, label: t0Name }, { color: T1, label: t1Name }].map(({ color, label }) => (
                     <div key={label} style={{ display: "flex", alignItems: "center", gap: "6px" }}>
                       <div style={{ width: 10, height: 10, borderRadius: "50%", background: color }} />
                       <span style={{ fontSize: "0.78rem", color: "#888" }}>{label}</span>
@@ -474,10 +484,10 @@ export default function AnalyticsClient() {
                     tickFormatter={v => `${v}%`} />
                   <Tooltip
                     contentStyle={{ background: "#1a1a1a", border: "1px solid #2a2a2a", borderRadius: "6px", fontSize: "0.8rem" }}
-                    formatter={(v: number | string, name: string) => [`${v}%`, name === "t0" ? "Team 0" : "Team 1"]}
+                    formatter={(v: number | string, name: string) => [`${v}%`, name === "t0" ? t0Name : t1Name]}
                     labelFormatter={l => `Min ${l}`}
                   />
-                  <Legend formatter={v => v === "t0" ? "Team 0" : "Team 1"}
+                  <Legend formatter={v => v === "t0" ? t0Name : t1Name}
                     wrapperStyle={{ fontSize: "0.8rem", paddingTop: "0.5rem" }} />
                   <Area dataKey="t0" name="t0" stroke={T0} strokeWidth={2}
                     fill="url(#gT0)" activeDot={{ r: 5 }} />
@@ -513,8 +523,8 @@ export default function AnalyticsClient() {
                   <Tooltip contentStyle={{ background: "#1a1a1a", border: "1px solid #2a2a2a", borderRadius: "6px", fontSize: "0.8rem" }}
                     formatter={(v: number | string, name: string) => [`${v}%`, name]} />
                   <Legend wrapperStyle={{ fontSize: "0.8rem", paddingTop: "0.5rem" }} />
-                  <Bar dataKey="T0" name="Team 0" fill={T0} radius={[4, 4, 0, 0]} barSize={36} />
-                  <Bar dataKey="T1" name="Team 1" fill={T1} radius={[4, 4, 0, 0]} barSize={36} />
+                  <Bar dataKey="T0" name={t0Name} fill={T0} radius={[4, 4, 0, 0]} barSize={36} />
+                  <Bar dataKey="T1" name={t1Name} fill={T1} radius={[4, 4, 0, 0]} barSize={36} />
                 </BarChart>
               </ResponsiveContainer>
             </motion.div>

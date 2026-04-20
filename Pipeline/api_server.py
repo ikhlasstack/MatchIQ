@@ -40,7 +40,7 @@ from pathlib import Path
 
 import cv2
 import pandas as pd
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import Body, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 
@@ -79,6 +79,25 @@ def _load_models():
 
 # ── Uploaded video filename (set during /upload, read by _save_match) ──────────
 _uploaded_filename: str = "Unknown.mp4"
+
+
+# ── Player/team naming helpers ─────────────────────────────────────────────────
+def _names_path(match_dir: Path) -> Path:
+    return match_dir / "names.json"
+
+
+def _read_names(match_dir: Path) -> dict:
+    p = _names_path(match_dir)
+    if p.exists():
+        try:
+            return json.loads(p.read_text())
+        except Exception:
+            pass
+    return {"players": {}, "teams": {}}
+
+
+def _write_names(match_dir: Path, data: dict) -> None:
+    _names_path(match_dir).write_text(json.dumps(data, indent=2))
 
 
 # ── Persistent match storage ───────────────────────────────────────────────────
@@ -125,7 +144,10 @@ def _save_match(original_name: str):
         "players":  players,
     }
     (match_dir / "meta.json").write_text(json.dumps(meta, indent=2))
+    # Initialise an empty names file so the frontend can immediately PUT to it
+    _write_names(match_dir, {"players": {}, "teams": {}})
     print(f"[MatchIQ] Match saved → {match_dir}")
+    return match_id
 
 
 # ── Non-player ID helper ───────────────────────────────────────────────────────
@@ -222,6 +244,7 @@ _STATUS: dict = {
     "error":     None,
     "running":   False,
     "streaming": False,   # True only while MJPEG frames are being pushed
+    "match_id":  None,    # Set after _save_match completes
 }
 _lock = threading.Lock()
 
@@ -257,8 +280,8 @@ def _run_pipeline():
         _set(phase=4)
         Match_Outcome()
 
-        _save_match(original_name=_uploaded_filename)
-        _set(done=True, running=False)
+        saved_id = _save_match(original_name=_uploaded_filename)
+        _set(done=True, running=False, match_id=saved_id)
 
     except Exception as exc:
         _set(error=str(exc), running=False, streaming=False)
@@ -295,7 +318,7 @@ async def upload_video(file: UploadFile = File(...)):
     data = await file.read()
     INPUT_VIDEO.write_bytes(data)
     _uploaded_filename = file.filename or "Unknown.mp4"
-    _set(phase=0, done=False, error=None, running=False, streaming=False)
+    _set(phase=0, done=False, error=None, running=False, streaming=False, match_id=None)
     return {"ok": True, "filename": file.filename, "bytes": len(data)}
 
 
@@ -760,6 +783,31 @@ def saved_movement(match_id: str):
 
     result.sort(key=lambda r: r["player_id"])
     return result
+
+
+# ── GET /matches/{match_id}/names ─────────────────────────────────────────────
+@app.get("/matches/{match_id}/names")
+def get_names(match_id: str):
+    return _read_names(_match_dir(match_id))
+
+
+# ── PUT /matches/{match_id}/names ─────────────────────────────────────────────
+@app.put("/matches/{match_id}/names")
+def put_names(match_id: str, payload: dict = Body(...)):
+    """Save player and team name mappings.
+
+    Expected body:
+      { "players": {"1": "Alice", "7": "Bob", ...},
+        "teams":   {"0": "Red FC", "1": "Blue FC"} }
+    """
+    d = _match_dir(match_id)
+    existing = _read_names(d)
+    if "players" in payload:
+        existing["players"].update({str(k): v for k, v in payload["players"].items()})
+    if "teams" in payload:
+        existing["teams"].update({str(k): v for k, v in payload["teams"].items()})
+    _write_names(d, existing)
+    return existing
 
 
 # ── GET /matches/{match_id}/video ──────────────────────────────────────────────

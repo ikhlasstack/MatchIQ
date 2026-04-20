@@ -53,7 +53,8 @@ interface Player {
 
 /* ── helpers ──────────────────────────────────────────────── */
 const teamColor = (team: number) => team === 0 ? "#3b82f6" : "#f43f5e";
-const teamLabel = (team: number) => `Team ${team}`;
+/* teamLabel is injected per-render via the names map; this is the fallback */
+const defaultTeamLabel = (team: number) => `Team ${team + 1}`;
 
 function fatigueColor(level: string) {
   if (level === "HIGH")   return "#ef4444";
@@ -162,7 +163,11 @@ function PlayerCharts({ player }: { player: Player }) {
 }
 
 /* ── player card ──────────────────────────────────────────── */
-function PlayerCard({ player }: { player: Player }) {
+function PlayerCard({ player, playerName, teamName }: {
+  player: Player;
+  playerName?: string;
+  teamName?: string;
+}) {
   const [open, setOpen] = useState(false);
   const fc = fatigueColor(player.fatigueLevel);
 
@@ -195,9 +200,11 @@ function PlayerCard({ player }: { player: Player }) {
             #{player.id}
           </div>
           <div>
-            <div style={{ fontSize: "0.95rem", fontWeight: 700 }}>Player #{player.id}</div>
+            <div style={{ fontSize: "0.95rem", fontWeight: 700 }}>
+              {playerName || `Player #${player.id}`}
+            </div>
             <div style={{ fontSize: "0.75rem", color: teamColor(player.team), fontWeight: 600 }}>
-              {teamLabel(player.team)}
+              {teamName || defaultTeamLabel(player.team)}
             </div>
           </div>
         </div>
@@ -256,16 +263,22 @@ function mergePlayers(movement: MovementRow[], fatigue: FatigueRow[]): Player[] 
   });
 }
 
+interface NamesMap { players: Record<string, string>; teams: Record<string, string>; }
+
 /* ── main ─────────────────────────────────────────────────── */
 export default function DashboardClient() {
   const [matches,    setMatches]    = useState<MatchMeta[]>([]);
   const [matchId,    setMatchId]    = useState<string>("");
   const [players,    setPlayers]    = useState<Player[]>([]);
+  const [names,      setNames]      = useState<NamesMap>({ players: {}, teams: {} });
   const [loading,    setLoading]    = useState(true);
   const [fetching,   setFetching]   = useState(false);
   const [error,      setError]      = useState<string | null>(null);
   const [teamFilter, setTeamFilter] = useState<"all" | 0 | 1>("all");
   const [sortBy,     setSortBy]     = useState<"fatigue" | "speed" | "sprints">("fatigue");
+
+  const teamLabel = (team: number) =>
+    names.teams[String(team)] || defaultTeamLabel(team);
 
   /* Load match list */
   useEffect(() => {
@@ -279,20 +292,23 @@ export default function DashboardClient() {
       .finally(() => setLoading(false));
   }, []);
 
-  /* Fetch player data whenever match changes */
+  /* Fetch player data + names whenever match changes */
   useEffect(() => {
     if (!matchId) return;
     setFetching(true);
     setError(null);
     setPlayers([]);
+    setNames({ players: {}, teams: {} });
 
     Promise.all([
       fetch(`${API}/matches/${matchId}/results/movement`).then(r => r.json()),
       fetch(`${API}/matches/${matchId}/results/fatigue`).then(r => r.json()),
+      fetch(`${API}/matches/${matchId}/names`).then(r => r.ok ? r.json() : { players: {}, teams: {} }),
     ])
-      .then(([movement, fatigue]) => {
+      .then(([movement, fatigue, savedNames]) => {
         const merged = mergePlayers(movement as MovementRow[], fatigue as FatigueRow[]);
         setPlayers(merged);
+        setNames(savedNames as NamesMap);
         if (merged.length === 0) setError("No player data available for this match.");
       })
       .catch(() => setError("Failed to load player data. Check that the backend is running."))
@@ -357,7 +373,7 @@ export default function DashboardClient() {
                   background: teamFilter === t ? "rgba(212,175,55,0.12)" : "transparent",
                   color: teamFilter === t ? GOLD : "#888",
                 }}>
-                {t === "all" ? "All Teams" : `Team ${t}`}
+                {t === "all" ? "All Teams" : teamLabel(t)}
               </button>
             ))}
           </div>
@@ -420,7 +436,11 @@ export default function DashboardClient() {
         <div style={{ display: "flex", flexDirection: "column", gap: "1rem", paddingBottom: "3rem" }}>
           {filtered.map((p, i) => (
             <motion.div key={`${matchId}-${p.id}`} initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: i * 0.05 }}>
-              <PlayerCard player={p} />
+              <PlayerCard
+                player={p}
+                playerName={names.players[String(p.id)]}
+                teamName={teamLabel(p.team)}
+              />
             </motion.div>
           ))}
         </div>
