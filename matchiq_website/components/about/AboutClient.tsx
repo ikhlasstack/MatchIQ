@@ -4,20 +4,20 @@ import { motion } from "framer-motion";
 import { GraduationCap, Code2, Brain, Globe } from "lucide-react";
 
 const TEAM = [
-  { name: "Zainab Hasan",   role: "Computer Vision Engineer", icon: "👁️",  color: "#a855f7", bio: "Designed and implemented the YOLO-based player detection and ByteTrack multi-object tracking pipeline.",       skills: ["YOLO", "ByteTrack", "OpenCV", "Python"] },
+  { name: "Zainab Hasan",   role: "Computer Vision Engineer", icon: "👑",  color: "#a855f7", bio: "Designed and implemented the YOLO-based player detection and ByteTrack multi-object tracking pipeline.",       skills: ["YOLO", "ByteTrack", "OpenCV", "Python"] },
   { name: "Ikhlas Khan",    role: "AI Engineer",              icon: "🧠",  color: "#3b82f6", bio: "Developed the fatigue estimation, goal probability model, and match outcome prediction algorithms.",           skills: ["PyTorch", "FastAPI", "NumPy", "SciPy"] },
   { name: "Musab Suhail",   role: "Full Stack Developer",     icon: "💻",  color: "#D4AF37", bio: "Built the real-time WebSocket pipeline, Next.js frontend, and all data visualization components.",             skills: ["Next.js", "Recharts", "WebSocket", "Node"] },
 ];
 
 const STACK = [
-  { name: "YOLO v8",    desc: "Object Detection",     color: "#8b5cf6" },
-  { name: "ByteTrack",  desc: "Multi-Object Tracking",color: "#06b6d4" },
-  { name: "Python",     desc: "Backend & AI",         color: "#3b82f6" },
-  { name: "FastAPI",    desc: "REST API",              color: "#22c55e" },
-  { name: "Next.js",    desc: "Frontend",              color: "#fff"    },
-  { name: "Recharts",   desc: "Data Visualization",   color: "#f97316" },
-  { name: "OpenCV",     desc: "Video Processing",      color: "#ec4899" },
-  { name: "WebSocket",  desc: "Real-time Streaming",  color: "#eab308" },
+  { name: "YOLO v8",    desc: "Object Detection",     color: "#D4AF37" },
+  { name: "ByteTrack",  desc: "Multi-Object Tracking",color: "#D4AF37" },
+  { name: "Python",     desc: "Backend & AI",         color: "#D4AF37" },
+  { name: "FastAPI",    desc: "REST API",              color: "#D4AF37" },
+  { name: "Next.js",    desc: "Frontend",              color: "#D4AF37" },
+  { name: "Recharts",   desc: "Data Visualization",   color: "#D4AF37" },
+  { name: "OpenCV",     desc: "Video Processing",      color: "#D4AF37" },
+  { name: "WebSocket",  desc: "Real-time Streaming",  color: "#D4AF37" },
 ];
 
 const fade = (delay = 0) => ({
@@ -115,14 +115,14 @@ export default function AboutClient() {
               Our <span style={{ color: "#D4AF37" }}>Stack</span>
             </h2>
           </motion.div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(160px,1fr))", gap: "1rem" }}>
+          <div style={{ display: "flex", flexWrap: "nowrap", gap: "0.75rem", overflowX: "auto", paddingBottom: "0.5rem", justifyContent: "center" }}>
             {STACK.map(({ name, desc, color }, i) => (
               <motion.div key={name} {...fade(i * 0.06)}
                 className="card-hover"
-                style={{ background: "#0a0a0a", border: "1px solid #2a2a2a", borderRadius: "0.875rem", padding: "1.25rem", textAlign: "center" }}>
-                <Code2 size={20} style={{ color, margin: "0 auto 0.6rem" }} />
-                <div style={{ fontSize: "0.95rem", fontWeight: 800, color }}>{name}</div>
-                <div style={{ fontSize: "0.7rem", color: "#888", marginTop: "0.2rem" }}>{desc}</div>
+                style={{ background: "#0a0a0a", border: "1px solid #2a2a2a", borderRadius: "0.875rem", padding: "1rem 1.25rem", textAlign: "center", flexShrink: 0 }}>
+                <Code2 size={18} style={{ color, margin: "0 auto 0.5rem" }} />
+                <div style={{ fontSize: "0.85rem", fontWeight: 800, color, whiteSpace: "nowrap" }}>{name}</div>
+                <div style={{ fontSize: "0.65rem", color: "#888", marginTop: "0.2rem", whiteSpace: "nowrap" }}>{desc}</div>
               </motion.div>
             ))}
           </div>

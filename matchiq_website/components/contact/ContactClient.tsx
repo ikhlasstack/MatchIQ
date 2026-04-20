@@ -11,8 +11,8 @@ type Errors    = Partial<FormState>;
 /* ── static data ────────────────────────────────────────────── */
 const CONTACT_INFO = [
   { icon: Mail,   label: "Email",    value: "matchiq.iba@gmail.com",        href: "mailto:matchiq.iba@gmail.com", color: "#D4AF37" },
-  { icon: Globe,  label: "LinkedIn", value: "linkedin.com/company/matchiq", href: "#",                            color: "#0a66c2" },
-  { icon: Code2,  label: "GitHub",   value: "github.com/matchiq-iba",       href: "#",                            color: "#e2e8f0" },
+  { icon: Globe,  label: "LinkedIn", value: "linkedin.com/company/matchiq", href: "#",                            color: "#D4AF37" },
+  { icon: Code2,  label: "GitHub",   value: "github.com/matchiq-iba",       href: "#",                            color: "#D4AF37" },
   { icon: MapPin, label: "Location", value: "IBA Karachi — FYP 2026",       href: "#",                            color: "#D4AF37" },
 ];
 

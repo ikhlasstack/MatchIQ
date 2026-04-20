@@ -6,15 +6,15 @@ import { Star } from "lucide-react";
 const TESTIMONIALS = [
   {
     quote: "MatchIQ completely changed how we review matches. The fatigue tracking alone saved us from two potential hamstring injuries mid-season.",
-    name: "Carlos Mendes", title: "Head of Performance", club: "FC Alvorada",   stars: 5,
+    name: "Ahmed Raza", title: "Head of Performance", club: "Karachi United FC", stars: 5,
   },
   {
     quote: "Our analysts used to spend 4 hours reviewing footage manually. MatchIQ processes a full match in minutes with accuracy we've never seen before.",
-    name: "Sophie Laurent", title: "Lead Video Analyst", club: "Stade Lumière", stars: 5,
+    name: "Sultan Mehmood", title: "Lead Video Analyst", club: "Lahore City FC", stars: 5,
   },
   {
     quote: "The goal probability model is surprisingly accurate. We've adjusted our tactical pressing patterns based on the threat maps it generates.",
-    name: "Tariq Al-Rashid", title: "Tactical Coach",    club: "Al Hilal Academy", stars: 5,
+    name: "Hamza Ali", title: "Tactical Coach", club: "Islamabad FC Academy", stars: 5,
   },
 ];
 

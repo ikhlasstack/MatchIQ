@@ -164,11 +164,15 @@ export default function HeroSection() {
               transition={{ delay: 0.16, duration: 0.65, ease: "easeOut" }}
               className="text-lg text-[#888] leading-relaxed max-w-lg mb-8"
             >
-              Upload any match footage. Get instant{" "}
-              <span className="text-white font-medium">player tracking</span>,{" "}
-              <span className="text-white font-medium">fatigue analysis</span>,{" "}
-              <span className="text-white font-medium">goal probability</span>, and{" "}
-              <span className="text-white font-medium">match outcome predictions</span>.
+              <span style={{
+                background: "linear-gradient(90deg, #D4AF37 0%, #fff 50%, #D4AF37 100%)",
+                WebkitBackgroundClip: "text",
+                WebkitTextFillColor: "transparent",
+                backgroundClip: "text",
+                fontWeight: 700,
+              }}>
+                Understand the Game Like Never Before
+              </span>
             </motion.p>
 
             {/* CTAs */}
