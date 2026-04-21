@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
 import { ArrowLeft, Calendar, Clock, Users, Film, Download } from "lucide-react";
@@ -10,18 +10,17 @@ import MatchOutcomeChart from "@/components/demo/tabs/MatchOutcomeChart";
 import PitchRadar from "@/components/demo/tabs/PitchRadar";
 import VideoTab from "@/components/demo/tabs/VideoTab";
 import PlayerNamingModal, { type NamesMap } from "@/components/demo/PlayerNamingModal";
-import type { FatigueRow, GoalProbRow, OutcomeData, TrackingRow } from "@/components/demo/DemoClient";
+import type { FatigueRow, GoalProbRow, OutcomeData, TrackingRow, AllTrackingData } from "@/components/demo/DemoClient";
 
 const API = "http://localhost:8000";
 
-type TabId = "video" | "fatigue" | "goal" | "outcome" | "radar";
+type TabId = "video" | "fatigue" | "goal" | "outcome";
 
 const TABS: { id: TabId; label: string }[] = [
   { id: "video",   label: "Tracked Video"   },
   { id: "fatigue", label: "Player Fatigue"  },
   { id: "goal",    label: "Goal Probability" },
   { id: "outcome", label: "Match Outcome"   },
-  { id: "radar",   label: "Pitch Radar"     },
 ];
 
 interface MatchMeta {
@@ -40,11 +39,15 @@ export default function MatchResultsClient({ matchId }: { matchId: string }) {
   const [fatigueData,  setFatigueData]  = useState<FatigueRow[] | null>(null);
   const [goalProbData, setGoalProbData] = useState<GoalProbRow[] | null>(null);
   const [outcomeData,  setOutcomeData]  = useState<OutcomeData | null>(null);
-  const [trackingData, setTrackingData] = useState<TrackingRow[] | null>(null);
-  const [loading,      setLoading]      = useState(true);
-  const [error,        setError]        = useState<string | null>(null);
-  const [names,        setNames]        = useState<NamesMap>({ players: {}, teams: {} });
-  const [showNaming,   setShowNaming]   = useState(false);
+  const [trackingData,    setTrackingData]    = useState<TrackingRow[] | null>(null);
+  const [allTrackingData, setAllTrackingData] = useState<AllTrackingData | null>(null);
+  const [currentFrame,    setCurrentFrame]    = useState(0);
+  const [loading,         setLoading]         = useState(true);
+  const [error,           setError]           = useState<string | null>(null);
+  const [names,           setNames]           = useState<NamesMap>({ players: {}, teams: {} });
+  const [showNaming,      setShowNaming]       = useState(false);
+
+  const handleFrameChange = useCallback((f: number) => setCurrentFrame(f), []);
 
   const videoUrl    = `${API}/matches/${matchId}/video`;
   const downloadUrl = `${API}/matches/${matchId}/video`;
@@ -52,7 +55,7 @@ export default function MatchResultsClient({ matchId }: { matchId: string }) {
   useEffect(() => {
     async function load() {
       try {
-        const [metaRes, fat, goal, out, track, savedNames] = await Promise.all([
+        const [metaRes, fat, goal, out, track, allTrack, savedNames] = await Promise.all([
           fetch(`${API}/matches/${matchId}`).then(r => {
             if (!r.ok) throw new Error("Match not found");
             return r.json();
@@ -61,6 +64,7 @@ export default function MatchResultsClient({ matchId }: { matchId: string }) {
           fetch(`${API}/matches/${matchId}/results/goal-prob`).then(r => r.json()),
           fetch(`${API}/matches/${matchId}/results/outcome`).then(r => r.json()),
           fetch(`${API}/matches/${matchId}/results/tracking`).then(r => r.json()),
+          fetch(`${API}/matches/${matchId}/results/tracking/frames`).then(r => r.json()),
           fetch(`${API}/matches/${matchId}/names`).then(r => r.ok ? r.json() : { players: {}, teams: {} }),
         ]);
         setMeta(metaRes);
@@ -68,6 +72,7 @@ export default function MatchResultsClient({ matchId }: { matchId: string }) {
         setGoalProbData(goal);
         setOutcomeData(out);
         setTrackingData(track);
+        setAllTrackingData(allTrack);
         setNames(savedNames);
       } catch (e: unknown) {
         setError(e instanceof Error ? e.message : "Could not load match data. Is the backend running?");
@@ -175,19 +180,38 @@ export default function MatchResultsClient({ matchId }: { matchId: string }) {
 
       {/* Tab content */}
       <div className="wrap" style={{ paddingTop: "2rem", paddingBottom: "3rem" }}>
-        <AnimatePresence mode="wait">
-          <motion.div key={activeTab}
-            initial={{ opacity: 0, y: 8 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -8 }}
-            transition={{ duration: 0.2 }}>
-            {activeTab === "video"   && <VideoTab done={true} isStreaming={false} phase={4} videoUrl={videoUrl} />}
-            {activeTab === "fatigue" && <FatigueChart data={fatigueData} names={names} />}
-            {activeTab === "goal"    && <GoalProbChart data={goalProbData} names={names} />}
-            {activeTab === "outcome" && <MatchOutcomeChart data={outcomeData} names={names} />}
-            {activeTab === "radar"   && <PitchRadar data={trackingData} names={names} />}
-          </motion.div>
-        </AnimatePresence>
+        <div style={{ position: "relative", minHeight: "520px" }}>
+          <AnimatePresence mode="wait">
+            <motion.div key={activeTab}
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -8 }}
+              transition={{ duration: 0.2 }}>
+              {activeTab === "video"   && (
+                <VideoTab
+                  done={true}
+                  isStreaming={false}
+                  phase={4}
+                  videoUrl={videoUrl}
+                  onFrameChange={handleFrameChange}
+                />
+              )}
+              {activeTab === "fatigue" && <FatigueChart data={fatigueData} names={names} />}
+              {activeTab === "goal"    && <GoalProbChart data={goalProbData} names={names} />}
+              {activeTab === "outcome" && <MatchOutcomeChart data={outcomeData} names={names} />}
+            </motion.div>
+          </AnimatePresence>
+
+          {activeTab === "video" && (
+            <PitchRadar
+              data={trackingData}
+              allData={allTrackingData}
+              currentFrame={currentFrame}
+              names={names}
+              floating
+            />
+          )}
+        </div>
       </div>
     </div>
   );

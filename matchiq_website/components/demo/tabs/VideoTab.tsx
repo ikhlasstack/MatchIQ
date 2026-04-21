@@ -89,10 +89,12 @@ function TrackedVideoPlayer({
   done,
   videoRef,
   videoUrl,
+  onFrameChange,
 }: {
   done: boolean;
   videoRef: React.RefObject<HTMLVideoElement | null>;
   videoUrl?: string;
+  onFrameChange?: (frame: number) => void;
 }) {
   const [playing,   setPlaying]   = useState(false);
   const [current,   setCurrent]   = useState(0);
@@ -135,7 +137,10 @@ function TrackedVideoPlayer({
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
-    const onTime  = () => setCurrent(v.currentTime);
+    const onTime  = () => {
+      setCurrent(v.currentTime);
+      onFrameChange?.(Math.round(v.currentTime * 25));
+    };
     const onMeta  = () => setDuration(v.duration);
     const onPlay  = () => setPlaying(true);
     const onPause = () => setPlaying(false);
@@ -152,9 +157,7 @@ function TrackedVideoPlayer({
       v.removeEventListener("pause",          onPause);
       v.removeEventListener("ended",          onEnded);
     };
-  }, [videoRef]);
-
-  const pct = duration > 0 ? (current / duration) * 100 : 0;
+  }, [videoRef, onFrameChange]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
@@ -300,11 +303,13 @@ export default function VideoTab({
   isStreaming,
   phase,
   videoUrl,
+  onFrameChange,
 }: {
   done: boolean;
   isStreaming: boolean;
   phase: number;
   videoUrl?: string;
+  onFrameChange?: (frame: number) => void;
 }) {
   /* ── post-pipeline <video> ref ── */
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -360,9 +365,11 @@ export default function VideoTab({
   /* ── Live follow: when live, always display the newest frame ── */
   useEffect(() => {
     if (isLive && frames.length > 0) {
-      setFrameIdx(frames.length - 1);
+      const idx = frames.length - 1;
+      setFrameIdx(idx);
+      onFrameChange?.(idx);
     }
-  }, [isLive, frames.length]);
+  }, [isLive, frames.length, onFrameChange]);
 
   /* ── Sequential playback (only when not live) ── */
   useEffect(() => {
@@ -493,9 +500,11 @@ export default function VideoTab({
             max={Math.max(frames.length - 1, 0)}
             value={frameIdx}
             onChange={e => {
+              const f = Number(e.target.value);
               setIsLive(false);
               setIsPlaying(false);
-              setFrameIdx(Number(e.target.value));
+              setFrameIdx(f);
+              onFrameChange?.(f);
             }}
             style={{ width: "100%", accentColor: "#D4AF37", cursor: "pointer", height: "4px" }}
           />
@@ -573,7 +582,7 @@ export default function VideoTab({
    * CASE 2 — Post-pipeline: custom video player (play/pause, seek, speed)
    * ════════════════════════════════════════════════════════════════════════════ */
   if (showVideo) {
-    return <TrackedVideoPlayer done={done} videoRef={videoRef} videoUrl={videoUrl} />;
+    return <TrackedVideoPlayer done={done} videoRef={videoRef} videoUrl={videoUrl} onFrameChange={onFrameChange} />;
   }
 
   /* ════════════════════════════════════════════════════════════════════════════

@@ -15,8 +15,8 @@ import PlayerNamingModal, { type NamesMap } from "./PlayerNamingModal";
 const API = "http://localhost:8000";
 
 /* ── Types ────────────────────────────────────────────────────────────────── */
-type Stage = "idle" | "uploading" | "processing" | "done" | "error";
-type TabId = "video" | "fatigue" | "goal" | "outcome" | "radar";
+type Stage = "idle" | "uploading" | "processing" | "cancelling" | "cancelled" | "done" | "error";
+type TabId = "video" | "fatigue" | "goal" | "outcome";
 
 export type FatigueRow = { label: string; score: number; level: string; team: number };
 export type GoalProbRow = { frame: number; t0: number; t1: number };
@@ -28,6 +28,7 @@ export type OutcomeData = {
   momentum: { t0: number; t1: number };
 };
 export type TrackingRow = { id: number; team: number; role: string; x: number; y: number };
+export type AllTrackingData = { fps: number; total_frames: number; frames: Record<string, TrackingRow[]> };
 
 const PROCESSING_STEPS = [
   "Uploading footage…",
@@ -41,15 +42,15 @@ const TABS: { id: TabId; label: string }[] = [
   { id: "fatigue", label: "Player Fatigue" },
   { id: "goal", label: "Goal Probability" },
   { id: "outcome", label: "Match Outcome" },
-  { id: "radar", label: "Pitch Radar" },
 ];
 
 /* ── Upload Panel ─────────────────────────────────────────────────────────── */
 function UploadPanel({
-  stage, doneSteps, fileName, errorMsg, onFile, onReset,
+  stage, doneSteps, fileName, errorMsg, savedMatchId, onFile, onReset, onCancel,
 }: {
   stage: Stage; doneSteps: number; fileName: string;
-  errorMsg: string; onFile: (f: File) => void; onReset: () => void;
+  errorMsg: string; savedMatchId: string | null;
+  onFile: (f: File) => void; onReset: () => void; onCancel: () => void;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [drag, setDrag] = useState(false);
@@ -102,7 +103,7 @@ function UploadPanel({
 
       {/* Processing steps */}
       <AnimatePresence>
-        {stage !== "idle" && stage !== "error" && (
+        {(stage === "processing" || stage === "cancelling" || stage === "done" || stage === "uploading") && (
           <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}
             style={{ background: "#111", border: "1px solid #2a2a2a", borderRadius: "1rem", padding: "1.5rem", display: "flex", flexDirection: "column", gap: "1rem" }}>
             <p style={{ fontSize: "0.7rem", textTransform: "uppercase", letterSpacing: "0.12em", color: "#D4AF37", fontWeight: 600 }}>
@@ -125,9 +126,50 @@ function UploadPanel({
                 </div>
               );
             })}
+            {/* Cancel button — only while actively processing */}
+            {stage === "processing" && (
+              <button
+                onClick={onCancel}
+                style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "6px", marginTop: "0.25rem", padding: "0.55rem", borderRadius: "0.65rem", background: "transparent", border: "1px solid rgba(239,68,68,0.4)", color: "#ef4444", fontSize: "0.82rem", fontWeight: 600, cursor: "pointer" }}>
+                ✕ Cancel pipeline
+              </button>
+            )}
+            {stage === "cancelling" && (
+              <div style={{ display: "flex", alignItems: "center", gap: "8px", padding: "0.5rem", borderRadius: "0.65rem", background: "rgba(239,68,68,0.06)", border: "1px solid rgba(239,68,68,0.2)" }}>
+                <Loader2 size={14} style={{ color: "#ef4444", animation: "spin 1s linear infinite", flexShrink: 0 }} />
+                <span style={{ fontSize: "0.8rem", color: "#ef4444" }}>Stopping after current frame…</span>
+              </div>
+            )}
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* Cancelled state */}
+      {stage === "cancelled" && (
+        <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}
+          style={{ background: "rgba(239,68,68,0.06)", border: "1px solid rgba(239,68,68,0.25)", borderRadius: "1rem", padding: "1.25rem", display: "flex", flexDirection: "column", gap: "0.75rem" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}>
+            <AlertCircle size={16} style={{ color: "#f87171", flexShrink: 0 }} />
+            <p style={{ fontSize: "0.85rem", fontWeight: 700, color: "#f87171" }}>Pipeline cancelled</p>
+          </div>
+          <p style={{ fontSize: "0.78rem", color: "#888" }}>
+            Partial data up to the cancellation point has been saved automatically.
+          </p>
+          <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+            {savedMatchId && (
+              <button
+                onClick={() => window.open(`/gallery/${savedMatchId}`, "_blank")}
+                style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "6px", padding: "0.65rem", borderRadius: "0.65rem", background: "rgba(212,175,55,0.1)", border: "1px solid rgba(212,175,55,0.35)", color: "#D4AF37", fontSize: "0.85rem", fontWeight: 700, cursor: "pointer" }}>
+                View partial match in Gallery
+              </button>
+            )}
+            <button onClick={onReset}
+              style={{ fontSize: "0.8rem", color: "#555", textAlign: "center", background: "none", border: "none", cursor: "pointer" }}>
+              ↩ Analyse another video
+            </button>
+          </div>
+        </motion.div>
+      )}
 
       {/* Error state */}
       {stage === "error" && (
@@ -182,70 +224,88 @@ export default function DemoClient() {
   const [goalProbData, setGoalProbData] = useState<GoalProbRow[] | null>(null);
   const [outcomeData, setOutcomeData] = useState<OutcomeData | null>(null);
   const [trackingData, setTrackingData] = useState<TrackingRow[] | null>(null);
+  const [allTrackingData, setAllTrackingData] = useState<AllTrackingData | null>(null);
+  const [livePositions, setLivePositions] = useState<TrackingRow[] | null>(null);
+  const [currentFrame, setCurrentFrame] = useState(0);
   const [isStreaming,   setIsStreaming]   = useState(false);
   const [serverPhase,   setServerPhase]   = useState(0);
   const [savedMatchId,  setSavedMatchId]  = useState<string | null>(null);
   const [showNaming,    setShowNaming]    = useState(false);
   const [names,         setNames]         = useState<NamesMap>({ players: {}, teams: {} });
 
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const wsRef = useRef<WebSocket | null>(null);
 
   /* Fetch all results once pipeline is done */
   const fetchResults = useCallback(async () => {
     try {
-      const [fat, goal, out, track] = await Promise.all([
+      const [fat, goal, out, track, allTrack] = await Promise.all([
         fetch(`${API}/results/fatigue`).then(r => r.json()),
         fetch(`${API}/results/goal-prob`).then(r => r.json()),
         fetch(`${API}/results/outcome`).then(r => r.json()),
         fetch(`${API}/results/tracking`).then(r => r.json()),
+        fetch(`${API}/results/tracking/frames`).then(r => r.json()),
       ]);
       setFatigueData(fat);
       setGoalProbData(goal);
       setOutcomeData(out);
       setTrackingData(track);
+      setAllTrackingData(allTrack);
     } catch (_) {
       /* non-fatal — charts fall back to loading state */
     }
   }, []);
 
-  /* Poll /status while pipeline is running */
-  const startPolling = useCallback(() => {
-    if (pollRef.current) clearInterval(pollRef.current);
-    pollRef.current = setInterval(async () => {
-      try {
-        const res = await fetch(`${API}/status`);
-        const data = await res.json();
+  /* Open WebSocket once pipeline starts; close when done/cancelled/error */
+  const startWS = useCallback(() => {
+    if (wsRef.current) wsRef.current.close();
+    const ws = new WebSocket(`ws://localhost:8000/ws`);
+    wsRef.current = ws;
 
-        /* Map phase → doneSteps:
-           phase 0 = just uploaded     → 1 step done (upload)
-           phase 1 = tracking running  → 1 step done
-           phase 2 = features running  → 2 steps done
-           phase 3 = fatigue/goal      → 3 steps done
-           phase 4 = outcome running   → 3 steps done
-           done                        → 4 steps done  */
+    ws.onmessage = async (ev) => {
+      const msg = JSON.parse(ev.data);
+
+      if (msg.type === "positions") {
+        if (Array.isArray(msg.rows) && msg.rows.length > 0) setLivePositions(msg.rows);
+        return;
+      }
+
+      if (msg.type === "status") {
+        /* Map phase → doneSteps */
         const phaseToSteps: Record<number, number> = { 0: 1, 1: 1, 2: 2, 3: 3, 4: 3 };
-        setDoneSteps(data.done ? 4 : (phaseToSteps[data.phase] ?? 1));
-        setIsStreaming(data.streaming ?? false);
-        setServerPhase(data.phase ?? 0);
-        if (data.error) {
-          clearInterval(pollRef.current!);
-          setErrorMsg(data.error);
+        setDoneSteps(msg.done ? 4 : (phaseToSteps[msg.phase] ?? 1));
+        setIsStreaming(msg.streaming ?? false);
+        setServerPhase(msg.phase ?? 0);
+
+        if (msg.error) {
+          ws.close();
+          setErrorMsg(msg.error);
           setStage("error");
-        } else if (data.done) {
-          clearInterval(pollRef.current!);
+        } else if (msg.cancelled) {
+          ws.close();
+          setStage("cancelled");
+          if (msg.match_id) setSavedMatchId(msg.match_id);
+        } else if (msg.done) {
+          ws.close();
           setStage("done");
           await fetchResults();
-          if (data.match_id) {
-            setSavedMatchId(data.match_id);
+          if (msg.match_id) {
+            setSavedMatchId(msg.match_id);
             setShowNaming(true);
           }
         }
-      } catch (_) { /* server might still be starting */ }
-    }, 2500);
+      }
+    };
+
+    ws.onerror = () => { /* server not ready yet — will retry on next startProcessing */ };
   }, [fetchResults]);
 
-  /* Cleanup polling on unmount */
-  useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
+  /* Clear live positions when streaming stops */
+  useEffect(() => {
+    if (!isStreaming) setLivePositions(null);
+  }, [isStreaming]);
+
+  /* Cleanup WS on unmount */
+  useEffect(() => () => { wsRef.current?.close(); }, []);
 
   /* Main flow triggered by file selection */
   const startProcessing = async (file: File) => {
@@ -267,18 +327,24 @@ export default function DemoClient() {
       if (!runRes.ok) throw new Error("Failed to start pipeline");
       setStage("processing");
 
-      /* 3. Poll */
-      startPolling();
+      /* 3. Connect WebSocket for push updates */
+      startWS();
     } catch (err) {
       setErrorMsg(String(err));
       setStage("error");
     }
   };
 
+  const cancelPipeline = async () => {
+    setStage("cancelling");
+    try { await fetch(`${API}/cancel`, { method: "POST" }); } catch (_) {}
+  };
+
   const reset = () => {
-    if (pollRef.current) clearInterval(pollRef.current);
+    wsRef.current?.close();
     setStage("idle"); setDoneSteps(0); setFileName(""); setErrorMsg("");
-    setFatigueData(null); setGoalProbData(null); setOutcomeData(null); setTrackingData(null);
+    setFatigueData(null); setGoalProbData(null); setOutcomeData(null);
+    setTrackingData(null); setAllTrackingData(null); setLivePositions(null); setCurrentFrame(0);
     setSavedMatchId(null); setShowNaming(false); setNames({ players: {}, teams: {} });
   };
 
@@ -323,7 +389,8 @@ export default function DemoClient() {
             <UploadPanel
               stage={stage} doneSteps={doneSteps}
               fileName={fileName} errorMsg={errorMsg}
-              onFile={startProcessing} onReset={reset}
+              savedMatchId={savedMatchId}
+              onFile={startProcessing} onReset={reset} onCancel={cancelPipeline}
             />
           </div>
 
@@ -356,18 +423,35 @@ export default function DemoClient() {
             </div>
 
             {/* Tab content */}
-            <div style={{ background: "#111", border: "1px solid #2a2a2a", borderRadius: "1.25rem", padding: "2rem", minHeight: "480px" }}>
+            <div style={{ background: "#111", border: "1px solid #2a2a2a", borderRadius: "1.25rem", padding: "2rem", minHeight: "480px", position: "relative" }}>
               <AnimatePresence mode="wait">
                 <motion.div key={activeTab}
                   initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0, y: -8 }} transition={{ duration: 0.2 }}>
-                  {activeTab === "video" && <VideoTab done={stage === "done"} isStreaming={isStreaming} phase={serverPhase} />}
+                  {activeTab === "video" && (
+                    <VideoTab
+                      done={stage === "done"}
+                      isStreaming={isStreaming}
+                      phase={serverPhase}
+                      onFrameChange={setCurrentFrame}
+                    />
+                  )}
                   {activeTab === "fatigue" && <FatigueChart data={fatigueData} names={names} />}
                   {activeTab === "goal" && <GoalProbChart data={goalProbData} names={names} />}
                   {activeTab === "outcome" && <MatchOutcomeChart data={outcomeData} names={names} />}
-                  {activeTab === "radar" && <PitchRadar data={trackingData} names={names} />}
                 </motion.div>
               </AnimatePresence>
+
+              {/* Floating minimap — live during streaming, frame-synced post-pipeline */}
+              {activeTab === "video" && (isStreaming || stage === "done") && (
+                <PitchRadar
+                  data={isStreaming ? livePositions : trackingData}
+                  allData={isStreaming ? null : allTrackingData}
+                  currentFrame={isStreaming ? undefined : currentFrame}
+                  names={names}
+                  floating
+                />
+              )}
             </div>
 
             {stage === "idle" && (

@@ -31,6 +31,7 @@ os.environ["CORE_MODEL_PE_ENABLED"] = "False"
 from dotenv import load_dotenv
 from inference import get_model
 import supervision as sv
+import trackers as tr
 import numpy as np
 from sports.annotators.soccer import draw_pitch, draw_points_on_pitch
 from sports.configs.soccer import SoccerPitchConfiguration
@@ -81,11 +82,14 @@ class RealTimePlayerTracker:
             api_key=ROBOFLOW_API_KEY,
         )
         self.config = SoccerPitchConfiguration()
-        self.tracker = sv.ByteTrack(
-            track_activation_threshold=0.25,
+        self.tracker = tr.OCSORTTracker(
             lost_track_buffer=100,
-            minimum_matching_threshold=0.8,
-            frame_rate=25,
+            frame_rate=25.0,
+            minimum_consecutive_frames=1,
+            minimum_iou_threshold=0.3,
+            direction_consistency_weight=0.2,
+            high_conf_det_threshold=0.6,
+            delta_t=3,
         )
         self.tracker.reset()
         self.team_classifier = None
@@ -132,7 +136,7 @@ class RealTimePlayerTracker:
 
         non_ball = detections[detections.class_id != BALL_ID]
         non_ball = non_ball.with_nms(threshold=0.5, class_agnostic=False)
-        non_ball = self.tracker.update_with_detections(detections=non_ball)
+        non_ball = self.tracker.update(non_ball)
 
         goalkeepers = non_ball[non_ball.class_id == GOALKEEPER_ID]
         players = non_ball[non_ball.class_id == PLAYER_ID]
@@ -234,7 +238,7 @@ def resolve_goalkeepers_team_id(players, goalkeepers):
 
 
 
-def process_all_frames(PLAYER_DETECTION_MODEL, FIELD_DETECTION_MODEL, CONFIG, team_classifier):
+def process_all_frames(PLAYER_DETECTION_MODEL, FIELD_DETECTION_MODEL, CONFIG, team_classifier, on_frame=None, cancel_event=None):
     ellipse_annotator = sv.EllipseAnnotator(
     color=sv.ColorPalette.from_hex(['#00BFFF', '#FF1493', '#FFD700']),
     thickness=2
@@ -249,11 +253,14 @@ def process_all_frames(PLAYER_DETECTION_MODEL, FIELD_DETECTION_MODEL, CONFIG, te
     base=25, height=21, outline_thickness=1
     )
 
-    tracker = sv.ByteTrack(
-        track_activation_threshold=0.5,
-        lost_track_buffer=30,
-        minimum_matching_threshold=0.7,
-        frame_rate=25
+    tracker = tr.OCSORTTracker(
+        lost_track_buffer=150,
+        frame_rate=25.0,
+        minimum_consecutive_frames=1,
+        minimum_iou_threshold=0.3,
+        direction_consistency_weight=0.2,
+        high_conf_det_threshold=0.6,
+        delta_t=3,
     )
     tracker.reset()
 
@@ -289,7 +296,7 @@ def process_all_frames(PLAYER_DETECTION_MODEL, FIELD_DETECTION_MODEL, CONFIG, te
         # 3. Track players
         player_detections = detections[detections.class_id != BALL_ID]
         player_detections = player_detections.with_nms(threshold=0.5, class_agnostic=False)
-        player_detections = tracker.update_with_detections(detections=player_detections)
+        player_detections = tracker.update(player_detections)
 
         # 4. Split by role BEFORE class_ids get changed
         goalkeepers = player_detections[player_detections.class_id == GOALKEEPER_ID]
@@ -351,12 +358,8 @@ def process_all_frames(PLAYER_DETECTION_MODEL, FIELD_DETECTION_MODEL, CONFIG, te
             positions      = player_detections.get_anchors_coordinates(sv.Position.BOTTOM_CENTER)
             pitch_positions = transformer.transform_points(positions) if has_transform else [[None, None]] * len(positions)
 
-            MAX_TRACKER_ID = 25
             for i, tracker_id in enumerate(player_detections.tracker_id):
                 tid = int(tracker_id)
-                if tid > MAX_TRACKER_ID:
-                    # Mark as invalid or skip
-                    continue  # Optionally, you could append with a special flag instead of skipping
                 if tid in gk_ids:
                     role = 'goalkeeper'
                 elif tid in ref_ids:
@@ -376,6 +379,30 @@ def process_all_frames(PLAYER_DETECTION_MODEL, FIELD_DETECTION_MODEL, CONFIG, te
                     'confidence': float(player_detections.confidence[i])
                 })
 
+        # Fire live positions callback for minimap streaming
+        if on_frame is not None:
+            _PX_MIN, _PX_MAX = 1405.4, 11780.6
+            _PY_MIN, _PY_MAX = 46.9,   7082.8
+            live_rows = []
+            for rec in tracking_records:
+                if rec['frame'] != frame_number:
+                    continue
+                px, py = rec.get('pitch_x'), rec.get('pitch_y')
+                try:
+                    nx = round((float(px) - _PX_MIN) / (_PX_MAX - _PX_MIN) * 100, 2)
+                    ny = round((float(py) - _PY_MIN) / (_PY_MAX - _PY_MIN) * 100, 2)
+                except (TypeError, ValueError):
+                    nx = round(rec['x'] / 1920 * 100, 2)
+                    ny = round(rec['y'] / 1080 * 100, 2)
+                live_rows.append({
+                    'id':   rec['player_id'],
+                    'team': rec['team_id'],
+                    'role': rec['role'],
+                    'x':    nx,
+                    'y':    ny,
+                })
+            on_frame(live_rows)
+
         # 9. Annotate and write frame
         if player_detections.class_id is not None:
             player_detections.class_id = np.where( player_detections.class_id == -1, 2, player_detections.class_id ).astype(int)
@@ -389,6 +416,9 @@ def process_all_frames(PLAYER_DETECTION_MODEL, FIELD_DETECTION_MODEL, CONFIG, te
         out.write(annotated_frame)
 
         frame_number += 1
+
+        if cancel_event is not None and cancel_event.is_set():
+            break
 
     out.release()
     out = None  # prevent accidental double-release
@@ -428,6 +458,35 @@ def process_all_frames(PLAYER_DETECTION_MODEL, FIELD_DETECTION_MODEL, CONFIG, te
 
     # 11. Save CSV
     df = pd.DataFrame(tracking_records)
+
+    # Smooth team_id per player over a rolling window to fix track-swap artefacts.
+    # A player whose team_id flips for fewer than SWAP_WINDOW frames is corrected
+    # back to their dominant team; avoids downstream misattribution when two players
+    # from opposite teams briefly occlude each other.
+    SWAP_WINDOW = 50
+    players_mask = df['role'].isin(['player', 'goalkeeper']) & (df['team_id'] >= 0)
+    if players_mask.any():
+        def _smooth_team(group):
+            if len(group) < 2:
+                return group
+            ids = group['team_id'].values.copy()
+            # Rolling majority: for each position, look at the surrounding SWAP_WINDOW frames
+            smoothed = ids.copy()
+            half = SWAP_WINDOW // 2
+            for idx in range(len(ids)):
+                lo = max(0, idx - half)
+                hi = min(len(ids), idx + half + 1)
+                window = ids[lo:hi]
+                counts = np.bincount(window[window >= 0].astype(int), minlength=2)
+                if counts.sum() > 0:
+                    smoothed[idx] = int(np.argmax(counts))
+            group = group.copy()
+            group['team_id'] = smoothed
+            return group
+
+        smoothed_parts = df[players_mask].groupby('player_id', group_keys=False).apply(_smooth_team)
+        df.loc[players_mask, 'team_id'] = smoothed_parts['team_id'].values
+
     df.to_csv(OUTPUT_CSV_PATH, index=False)
 
     print(f'\n=== DONE ===')
@@ -439,7 +498,7 @@ def process_all_frames(PLAYER_DETECTION_MODEL, FIELD_DETECTION_MODEL, CONFIG, te
     print(df[df['role'] == 'player'][['frame','player_id','x','y','pitch_x','pitch_y','team_id']].head(8))
 
 
-def player_tracking(player_model=None, field_model=None):
+def player_tracking(player_model=None, field_model=None, on_frame=None, cancel_event=None):
     # 1 Load models (skipped when pre-loaded models are passed in from api_server)
     if player_model is None:
         player_model = get_model(model_id="football-vgiqa-3njno/2", api_key=ROBOFLOW_API_KEY)
@@ -466,6 +525,6 @@ def player_tracking(player_model=None, field_model=None):
     team_classifier.fit(crops)
 
     # 4 Detection on all frames
-    process_all_frames(player_model, field_model, CONFIG, team_classifier)
+    process_all_frames(player_model, field_model, CONFIG, team_classifier, on_frame=on_frame, cancel_event=cancel_event)
 
     return

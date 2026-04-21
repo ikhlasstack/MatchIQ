@@ -40,7 +40,7 @@ from pathlib import Path
 
 import cv2
 import pandas as pd
-from fastapi import Body, FastAPI, File, HTTPException, UploadFile
+from fastapi import Body, FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 
@@ -183,6 +183,26 @@ def _norm_pct(px, py):
 # Each element is raw JPEG bytes; None is the end-of-stream sentinel.
 _frame_queue: queue.Queue = queue.Queue(maxsize=60)
 _orig_video_writer = None          # saved reference during cv2 patch
+_latest_positions: list = []       # live tracking rows for /stream/positions
+
+# ── WebSocket connection manager ───────────────────────────────────────────────
+# Each entry is (WebSocket, asyncio.AbstractEventLoop)
+_ws_clients: list = []
+_ws_lock = threading.Lock()
+
+import asyncio as _asyncio
+
+
+def _ws_broadcast(message: dict):
+    """Push a JSON message to every connected WS client from any thread."""
+    text = json.dumps(message)
+    with _ws_lock:
+        clients = list(_ws_clients)
+    for ws, loop in clients:
+        try:
+            _asyncio.run_coroutine_threadsafe(ws.send_text(text), loop)
+        except Exception:
+            pass
 
 
 class _StreamingVideoWriter:
@@ -225,11 +245,19 @@ def _run_tracking_with_stream():
         except queue.Empty:
             break
 
+    global _latest_positions
+    _latest_positions = []
+
+    def _on_frame(rows):
+        global _latest_positions
+        _latest_positions = rows
+        _ws_broadcast({"type": "positions", "rows": rows})
+
     _set(streaming=True)
     _orig_video_writer = cv2.VideoWriter
     cv2.VideoWriter = _StreamingVideoWriter
     try:
-        player_tracking(player_model=_player_model, field_model=_field_model)
+        player_tracking(player_model=_player_model, field_model=_field_model, on_frame=_on_frame, cancel_event=_cancel_event)
     finally:
         cv2.VideoWriter = _orig_video_writer
         _orig_video_writer = None
@@ -245,18 +273,23 @@ _STATUS: dict = {
     "running":   False,
     "streaming": False,   # True only while MJPEG frames are being pushed
     "match_id":  None,    # Set after _save_match completes
+    "cancelled": False,
 }
 _lock = threading.Lock()
+_cancel_event = threading.Event()
 
 
 def _set(**kw):
     with _lock:
         _STATUS.update(kw)
+        snapshot = dict(_STATUS)
+    _ws_broadcast({"type": "status", **snapshot})
 
 
 # ── Background pipeline runner ─────────────────────────────────────────────────
 def _run_pipeline():
-    _set(running=True, done=False, error=None, phase=0, streaming=False)
+    _cancel_event.clear()
+    _set(running=True, done=False, error=None, phase=0, streaming=False, cancelled=False, match_id=None)
     try:
         from Movement_Features import features      # noqa
         from Fatigue           import fatigue       # noqa
@@ -267,14 +300,29 @@ def _run_pipeline():
         _set(phase=1)
         _run_tracking_with_stream()
 
+        if _cancel_event.is_set():
+            saved_id = _save_match(original_name=_uploaded_filename)
+            _set(cancelled=True, running=False, match_id=saved_id)
+            return
+
         # ── Phase 2: Movement features ────────────────────────────────────────
         _set(phase=2)
         features()
+
+        if _cancel_event.is_set():
+            saved_id = _save_match(original_name=_uploaded_filename)
+            _set(cancelled=True, running=False, match_id=saved_id)
+            return
 
         # ── Phase 3: Fatigue + goal probability ───────────────────────────────
         _set(phase=3)
         fatigue()
         goal_prob()
+
+        if _cancel_event.is_set():
+            saved_id = _save_match(original_name=_uploaded_filename)
+            _set(cancelled=True, running=False, match_id=saved_id)
+            return
 
         # ── Phase 4: Match outcome ────────────────────────────────────────────
         _set(phase=4)
@@ -318,7 +366,7 @@ async def upload_video(file: UploadFile = File(...)):
     data = await file.read()
     INPUT_VIDEO.write_bytes(data)
     _uploaded_filename = file.filename or "Unknown.mp4"
-    _set(phase=0, done=False, error=None, running=False, streaming=False, match_id=None)
+    _set(phase=0, done=False, error=None, running=False, streaming=False, match_id=None, cancelled=False)
     return {"ok": True, "filename": file.filename, "bytes": len(data)}
 
 
@@ -335,11 +383,46 @@ def run_pipeline():
     return {"ok": True}
 
 
+# ── POST /cancel ──────────────────────────────────────────────────────────────
+@app.post("/cancel")
+def cancel_pipeline():
+    with _lock:
+        if not _STATUS["running"]:
+            raise HTTPException(status_code=409, detail="No pipeline running")
+    _cancel_event.set()
+    return {"ok": True}
+
+
 # ── GET /status ────────────────────────────────────────────────────────────────
 @app.get("/status")
 def get_status():
     with _lock:
         return dict(_STATUS)
+
+
+# ── WebSocket /ws — push status + live positions ──────────────────────────────
+@app.websocket("/ws")
+async def websocket_endpoint(ws: WebSocket):
+    await ws.accept()
+    loop = _asyncio.get_running_loop()
+    with _ws_lock:
+        _ws_clients.append((ws, loop))
+    # Send current status immediately so the client doesn't wait for next event
+    with _lock:
+        snapshot = dict(_STATUS)
+    await ws.send_text(json.dumps({"type": "status", **snapshot}))
+    # Also send last known positions if streaming
+    if _latest_positions:
+        await ws.send_text(json.dumps({"type": "positions", "rows": _latest_positions}))
+    try:
+        while True:
+            # Keep connection alive; client sends nothing, we just wait for disconnect
+            await ws.receive_text()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        with _ws_lock:
+            _ws_clients[:] = [(w, l) for w, l in _ws_clients if w is not ws]
 
 
 # ── GET /stream/frames — live MJPEG during tracking ───────────────────────────
@@ -374,6 +457,14 @@ def stream_frames():
         media_type="multipart/x-mixed-replace; boundary=frame",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+# ── GET /stream/positions — latest player positions during tracking ────────────
+@app.get("/stream/positions")
+def stream_positions():
+    """Returns the most recent frame's tracking rows as JSON.
+    Poll this at ~10 Hz during streaming for a live minimap."""
+    return _latest_positions
 
 
 # ── GET /results/fatigue ───────────────────────────────────────────────────────
@@ -571,6 +662,47 @@ def results_tracking():
     return records
 
 
+# ── GET /results/tracking/frames — all frames, sampled ────────────────────────
+@app.get("/results/tracking/frames")
+def results_tracking_frames():
+    """Return per-frame tracking data for all frames, sampled to ≤1500 frames.
+    Response: { fps: int, total_frames: int, frames: { [frame: str]: TrackingRow[] } }"""
+    path = CSV_DIR / "1_tracking.csv"
+    if not path.exists():
+        return {"fps": 25, "total_frames": 0, "frames": {}}
+    df = pd.read_csv(path)
+    if df.empty:
+        return {"fps": 25, "total_frames": 0, "frames": {}}
+
+    all_frames = sorted(df["frame"].unique())
+    total = len(all_frames)
+    # Sample evenly to at most 1500 keyframes (~1 per second for a 60s clip at 25fps)
+    step = max(1, total // 1500)
+    sampled = all_frames[::step]
+
+    out: dict = {}
+    for f in sampled:
+        rows = df[df["frame"] == f]
+        records = []
+        for _, row in rows.iterrows():
+            px, py = _norm_pct(row.get("pitch_x"), row.get("pitch_y"))
+            if px is None:
+                raw_x = row.get("x", 960)
+                raw_y = row.get("y", 540)
+                px = round(float(raw_x) / 1920 * 100, 2) if pd.notna(raw_x) else 50.0
+                py = round(float(raw_y) / 1080 * 100, 2) if pd.notna(raw_y) else 50.0
+            records.append({
+                "id":   int(row["player_id"]),
+                "team": int(row["team_id"]) if pd.notna(row.get("team_id")) else -1,
+                "role": str(row["role"]),
+                "x":    px,
+                "y":    py,
+            })
+        out[str(f)] = records
+
+    return {"fps": 25, "total_frames": int(all_frames[-1]) + 1 if all_frames else 0, "frames": out}
+
+
 # ── GET /video/tracked ─────────────────────────────────────────────────────────
 @app.get("/video/tracked")
 def video_tracked():
@@ -717,6 +849,45 @@ def saved_tracking(match_id: str):
             "y":    py,
         })
     return records
+
+
+# ── GET /matches/{match_id}/results/tracking/frames ───────────────────────────
+@app.get("/matches/{match_id}/results/tracking/frames")
+def saved_tracking_frames(match_id: str):
+    """Per-frame tracking data for a saved match, sampled to ≤1500 frames."""
+    path = _match_dir(match_id) / "1_tracking.csv"
+    if not path.exists():
+        return {"fps": 25, "total_frames": 0, "frames": {}}
+    df = pd.read_csv(path)
+    if df.empty:
+        return {"fps": 25, "total_frames": 0, "frames": {}}
+
+    all_frames = sorted(df["frame"].unique())
+    total = len(all_frames)
+    step = max(1, total // 1500)
+    sampled = all_frames[::step]
+
+    out: dict = {}
+    for f in sampled:
+        rows = df[df["frame"] == f]
+        records = []
+        for _, row in rows.iterrows():
+            px, py = _norm_pct(row.get("pitch_x"), row.get("pitch_y"))
+            if px is None:
+                raw_x = row.get("x", 960)
+                raw_y = row.get("y", 540)
+                px = round(float(raw_x) / 1920 * 100, 2) if pd.notna(raw_x) else 50.0
+                py = round(float(raw_y) / 1080 * 100, 2) if pd.notna(raw_y) else 50.0
+            records.append({
+                "id":   int(row["player_id"]),
+                "team": int(row["team_id"]) if pd.notna(row.get("team_id")) else -1,
+                "role": str(row["role"]),
+                "x":    px,
+                "y":    py,
+            })
+        out[str(f)] = records
+
+    return {"fps": 25, "total_frames": int(all_frames[-1]) + 1 if all_frames else 0, "frames": out}
 
 
 # ── GET /matches/{match_id}/results/movement ──────────────────────────────────
