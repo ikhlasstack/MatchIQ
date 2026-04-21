@@ -95,6 +95,7 @@ class RealTimePlayerTracker:
         self.team_classifier = None
         self.team_crops = []
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        self._cached_transformer = None
         self._bootstrap_team_classifier()
 
     def _bootstrap_team_classifier(self):
@@ -113,7 +114,9 @@ class RealTimePlayerTracker:
             self.team_classifier = TeamClassifier(device=self.device)
             self.team_classifier.fit(self.team_crops)
 
-    def _resolve_transformer(self, frame):
+    def _resolve_transformer(self, frame, frame_id, interval=10):
+        if frame_id % interval != 0 and self._cached_transformer is not None:
+            return self._cached_transformer
         try:
             field_result = self.field_model.infer(frame, confidence=0.3)[0]
             key_points = sv.KeyPoints.from_inference(field_result)
@@ -121,10 +124,10 @@ class RealTimePlayerTracker:
             frame_ref = key_points.xy[0][kp_filter]
             pitch_ref = np.array(self.config.vertices)[kp_filter]
             if len(frame_ref) >= 4:
-                return ViewTransformer(source=frame_ref, target=pitch_ref)
+                self._cached_transformer = ViewTransformer(source=frame_ref, target=pitch_ref)
         except Exception:
-            return None
-        return None
+            pass
+        return self._cached_transformer
 
     def process_frame(self, frame, frame_id):
         result = self.player_model.infer(frame, confidence=self.confidence)[0]
@@ -163,7 +166,7 @@ class RealTimePlayerTracker:
             referees.class_id = np.full(len(referees), -1, dtype=int)
 
         tracked = sv.Detections.merge([players, goalkeepers, referees])
-        transformer = self._resolve_transformer(frame)
+        transformer = self._resolve_transformer(frame, frame_id)
         has_transform = transformer is not None
 
         frame_detections = []
@@ -280,14 +283,35 @@ def process_all_frames(PLAYER_DETECTION_MODEL, FIELD_DETECTION_MODEL, CONFIG, te
     tracking_records = []
     frame_number = 0
 
+    # Field detection cache — re-run every N frames instead of every frame
+    FIELD_REFRESH_INTERVAL = 10
+    cached_transformer: ViewTransformer | None = None
+
+    # Team classifier cache — keyed by tracker_id, refreshed every M frames
+    TEAM_CLASSIFY_INTERVAL = 5
+    team_id_cache: dict[int, int] = {}
+
+    INFER_SIZE = 640
+    orig_h, orig_w = None, None
+
     for frame in tqdm(
         sv.get_video_frames_generator(SOURCE_VIDEO_PATH),
         total=video_info.total_frames,
         desc='Processing'
     ):
+        # Resize to model's native input size before inference; scale detections back afterward
+        if orig_h is None:
+            orig_h, orig_w = frame.shape[:2]
+            scale_x, scale_y = orig_w / INFER_SIZE, orig_h / INFER_SIZE
+        small_frame = cv2.resize(frame, (INFER_SIZE, INFER_SIZE), interpolation=cv2.INTER_LINEAR)
+
         # 1. Detect
-        result = PLAYER_DETECTION_MODEL.infer(frame, confidence=CONFIDENCE)[0]
+        result = PLAYER_DETECTION_MODEL.infer(small_frame, confidence=CONFIDENCE)[0]
         detections = sv.Detections.from_inference(result)
+        # Scale bounding boxes back to original frame coordinates
+        if len(detections) > 0:
+            detections.xyxy[:, [0, 2]] *= scale_x
+            detections.xyxy[:, [1, 3]] *= scale_y
 
         # 2. Separate ball
         ball_detections = detections[detections.class_id == BALL_ID]
@@ -307,10 +331,16 @@ def process_all_frames(PLAYER_DETECTION_MODEL, FIELD_DETECTION_MODEL, CONFIG, te
         gk_ids  = set(goalkeepers.tracker_id.tolist()) if goalkeepers.tracker_id is not None else set()
         ref_ids = set(referees.tracker_id.tolist()) if referees.tracker_id is not None else set()
 
-        # 5. Classify teams
+        # 5. Classify teams (throttled — run every TEAM_CLASSIFY_INTERVAL frames)
         if len(players) > 0:
-            player_crops = [sv.crop_image(frame, xyxy) for xyxy in players.xyxy]
-            players.class_id = team_classifier.predict(player_crops)
+            if frame_number % TEAM_CLASSIFY_INTERVAL == 0:
+                player_crops = [sv.crop_image(frame, xyxy) for xyxy in players.xyxy]
+                new_ids = team_classifier.predict(player_crops)
+                for tid, cls in zip(players.tracker_id, new_ids):
+                    team_id_cache[int(tid)] = int(cls)
+            players.class_id = np.array(
+                [team_id_cache.get(int(tid), 0) for tid in players.tracker_id]
+            )
 
         if len(goalkeepers) > 0 and len(players) > 0:
             goalkeepers.class_id = resolve_goalkeepers_team_id(players, goalkeepers)
@@ -320,19 +350,23 @@ def process_all_frames(PLAYER_DETECTION_MODEL, FIELD_DETECTION_MODEL, CONFIG, te
 
         player_detections = sv.Detections.merge([players, goalkeepers, referees])
 
-        # 6. Get pitch transformer
-        has_transform = False
-        try:
-            result_field = FIELD_DETECTION_MODEL.infer(frame, confidence=0.3)[0]
-            key_points   = sv.KeyPoints.from_inference(result_field)
-            kp_filter    = key_points.confidence[0] > 0.5
-            frame_ref    = key_points.xy[0][kp_filter]
-            pitch_ref    = np.array(CONFIG.vertices)[kp_filter]
-            if len(frame_ref) >= 4:
-                transformer   = ViewTransformer(source=frame_ref, target=pitch_ref)
-                has_transform = True
-        except:
-            pass
+        # 6. Get pitch transformer (cached — refresh every FIELD_REFRESH_INTERVAL frames)
+        if frame_number % FIELD_REFRESH_INTERVAL == 0:
+            try:
+                result_field = FIELD_DETECTION_MODEL.infer(small_frame, confidence=0.3)[0]
+                key_points   = sv.KeyPoints.from_inference(result_field)
+                # Scale keypoints back to original frame coordinates
+                key_points.xy[0][:, 0] *= scale_x
+                key_points.xy[0][:, 1] *= scale_y
+                kp_filter    = key_points.confidence[0] > 0.5
+                frame_ref    = key_points.xy[0][kp_filter]
+                pitch_ref    = np.array(CONFIG.vertices)[kp_filter]
+                if len(frame_ref) >= 4:
+                    cached_transformer = ViewTransformer(source=frame_ref, target=pitch_ref)
+            except:
+                pass
+        transformer = cached_transformer
+        has_transform = transformer is not None
 
         # 7. Save ball to CSV
         if len(ball_detections) > 0:
@@ -380,27 +414,60 @@ def process_all_frames(PLAYER_DETECTION_MODEL, FIELD_DETECTION_MODEL, CONFIG, te
                 })
 
         # Fire live positions callback for minimap streaming
+        # Built from this frame's detection arrays directly — O(players) not O(total_records)
         if on_frame is not None:
-            _PX_MIN, _PX_MAX = 1405.4, 11780.6
-            _PY_MIN, _PY_MAX = 46.9,   7082.8
             live_rows = []
-            for rec in tracking_records:
-                if rec['frame'] != frame_number:
-                    continue
-                px, py = rec.get('pitch_x'), rec.get('pitch_y')
-                try:
-                    nx = round((float(px) - _PX_MIN) / (_PX_MAX - _PX_MIN) * 100, 2)
-                    ny = round((float(py) - _PY_MIN) / (_PY_MAX - _PY_MIN) * 100, 2)
-                except (TypeError, ValueError):
-                    nx = round(rec['x'] / 1920 * 100, 2)
-                    ny = round(rec['y'] / 1080 * 100, 2)
-                live_rows.append({
-                    'id':   rec['player_id'],
-                    'team': rec['team_id'],
-                    'role': rec['role'],
-                    'x':    nx,
-                    'y':    ny,
-                })
+
+            # Players and goalkeepers
+            if player_detections.tracker_id is not None:
+                pp = player_detections.get_anchors_coordinates(sv.Position.BOTTOM_CENTER)
+                pp_pitch = transformer.transform_points(pp) if has_transform else None
+                for i, tid in enumerate(player_detections.tracker_id):
+                    role = 'goalkeeper' if int(tid) in gk_ids else ('referee' if int(tid) in ref_ids else 'player')
+                    if pp_pitch is not None:
+                        try:
+                            # pitch coords are in metres (0–105 × 0–68) from ViewTransformer
+                            nx = round(float(pp_pitch[i][0]) / 105 * 100, 2)
+                            ny = round(float(pp_pitch[i][1]) / 68  * 100, 2)
+                        except (TypeError, ValueError):
+                            nx = round(float(pp[i][0]) / orig_w * 100, 2)
+                            ny = round(float(pp[i][1]) / orig_h * 100, 2)
+                    else:
+                        nx = round(float(pp[i][0]) / orig_w * 100, 2)
+                        ny = round(float(pp[i][1]) / orig_h * 100, 2)
+                    live_rows.append({
+                        'id':   int(tid),
+                        'team': int(player_detections.class_id[i]) if player_detections.class_id is not None else -1,
+                        'role': role,
+                        'x':    max(0.0, min(100.0, nx)),
+                        'y':    max(0.0, min(100.0, ny)),
+                    })
+
+            # Ball — broadcast it too so the minimap ball actually moves
+            if len(ball_detections) > 0:
+                for xyxy in ball_detections.xyxy:
+                    bx = float((xyxy[0] + xyxy[2]) / 2)
+                    by = float((xyxy[1] + xyxy[3]) / 2)
+                    if has_transform:
+                        try:
+                            bpt = transformer.transform_points(np.array([[bx, by]]))
+                            bnx = round(float(bpt[0][0]) / 105 * 100, 2)
+                            bny = round(float(bpt[0][1]) / 68  * 100, 2)
+                        except Exception:
+                            bnx = round(bx / orig_w * 100, 2)
+                            bny = round(by / orig_h * 100, 2)
+                    else:
+                        bnx = round(bx / orig_w * 100, 2)
+                        bny = round(by / orig_h * 100, 2)
+                    live_rows.append({
+                        'id':   -1,
+                        'team': -1,
+                        'role': 'ball',
+                        'x':    max(0.0, min(100.0, bnx)),
+                        'y':    max(0.0, min(100.0, bny)),
+                    })
+                    break  # only first ball detection
+
             on_frame(live_rows)
 
         # 9. Annotate and write frame
@@ -409,8 +476,7 @@ def process_all_frames(PLAYER_DETECTION_MODEL, FIELD_DETECTION_MODEL, CONFIG, te
 
         labels = [f"#{tid}" for tid in player_detections.tracker_id] if player_detections.tracker_id is not None else []
 
-        annotated_frame = frame.copy()
-        annotated_frame = ellipse_annotator.annotate(annotated_frame, player_detections)
+        annotated_frame = ellipse_annotator.annotate(frame, player_detections)
         annotated_frame = label_annotator.annotate(annotated_frame, player_detections, labels)
         annotated_frame = triangle_annotator.annotate(annotated_frame, ball_detections)
         out.write(annotated_frame)
@@ -508,17 +574,30 @@ def player_tracking(player_model=None, field_model=None, on_frame=None, cancel_e
     print(f"Using: {DEVICE}")
     STRIDE = 30
 
-    # 2 Collect player crops for team classification (stride-30 pass)
+    # 2 Collect player crops for team classification (stride-30 pass, capped at 150 crops)
     crops = []
+    _bs_size = 640
+    _bs_first = True
+    _bs_sx = _bs_sy = 1.0
     for frame in tqdm(
         sv.get_video_frames_generator(SOURCE_VIDEO_PATH, stride=STRIDE),
         desc='Collecting crops'
     ):
-        result = player_model.infer(frame, confidence=CONFIDENCE)[0]
+        if _bs_first:
+            _bh, _bw = frame.shape[:2]
+            _bs_sx, _bs_sy = _bw / _bs_size, _bh / _bs_size
+            _bs_first = False
+        small = cv2.resize(frame, (_bs_size, _bs_size), interpolation=cv2.INTER_LINEAR)
+        result = player_model.infer(small, confidence=CONFIDENCE)[0]
         detections = sv.Detections.from_inference(result)
+        if len(detections) > 0:
+            detections.xyxy[:, [0, 2]] *= _bs_sx
+            detections.xyxy[:, [1, 3]] *= _bs_sy
         player_only = detections[detections.class_id == PLAYER_ID]
         player_crops = [sv.crop_image(frame, xyxy) for xyxy in player_only.xyxy]
         crops += player_crops
+        if len(crops) >= 200:   # stop early — more crops don't improve KMeans
+            break
 
     # 3 Team classifier (must re-fit per video — jersey colours differ)
     team_classifier = TeamClassifier(device=DEVICE)

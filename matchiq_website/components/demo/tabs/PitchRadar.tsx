@@ -27,30 +27,56 @@ function withStickyBall(rows: TrackingRow[], lastBall: TrackingRow | null): Trac
   return [...rows, lastBall];
 }
 
-/* ── Shared pitch SVG renderer ─────────────────────────────────────────────── */
-function PitchSVG({ players, names, W, H }: {
+/*
+ * Fixed viewBox: 1050 × 680 (105m × 68m scaled ×10).
+ * All layout is in this coordinate space — W/H props are only used for
+ * the outer container size, not for player coordinate mapping.
+ * This guarantees the pitch always has the correct 105:68 aspect ratio
+ * regardless of how the SVG is scaled by the browser.
+ */
+const VW = 1050;  // viewBox width  (represents 105 m)
+const VH = 680;   // viewBox height (represents 68 m)
+const PAD_X = 20; // pitch border padding in viewBox units
+const PAD_Y = 14;
+
+function PitchSVG({ players, names, W }: {
   players: TrackingRow[];
   names?: NamesMap;
-  W: number;
-  H: number;
+  W: number;   // container pixel width — only used for dot sizing
 }) {
+  const fieldW = VW - PAD_X * 2;
+  const fieldH = VH - PAD_Y * 2;
+  const r = W < 280 ? 14 : 18;   // dot radius in viewBox units
+
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: "100%", display: "block" }} xmlns="http://www.w3.org/2000/svg">
-      <rect width={W} height={H} fill="#052e16" rx="6" />
-      <g stroke="#166534" strokeWidth="1.2" fill="none">
-        <rect x="20" y="14" width={W - 40} height={H - 28} rx="2" />
-        <line x1={W / 2} y1="14" x2={W / 2} y2={H - 14} />
-        <circle cx={W / 2} cy={H / 2} r={H * 0.14} />
-        <circle cx={W / 2} cy={H / 2} r="2" fill="#166534" />
-        <rect x="20"       y={H / 2 - H * 0.19} width={W * 0.14} height={H * 0.38} />
-        <rect x="20"       y={H / 2 - H * 0.08} width={W * 0.055} height={H * 0.16} />
-        <rect x={W - 20 - W * 0.14} y={H / 2 - H * 0.19} width={W * 0.14} height={H * 0.38} />
-        <rect x={W - 20 - W * 0.055} y={H / 2 - H * 0.08} width={W * 0.055} height={H * 0.16} />
+    <svg
+      viewBox={`0 0 ${VW} ${VH}`}
+      preserveAspectRatio="xMidYMid meet"
+      style={{ width: "100%", height: "100%", display: "block" }}
+      xmlns="http://www.w3.org/2000/svg"
+    >
+      <rect width={VW} height={VH} fill="#052e16" rx="6" />
+      <g stroke="#166534" strokeWidth="4" fill="none">
+        {/* Outer boundary */}
+        <rect x={PAD_X} y={PAD_Y} width={fieldW} height={fieldH} rx="2" />
+        {/* Halfway line */}
+        <line x1={VW / 2} y1={PAD_Y} x2={VW / 2} y2={VH - PAD_Y} />
+        {/* Centre circle — radius ~9.15 m → 91.5 viewBox units */}
+        <circle cx={VW / 2} cy={VH / 2} r={92} />
+        <circle cx={VW / 2} cy={VH / 2} r="6" fill="#166534" />
+        {/* Left penalty area: 40.32 m wide × 16.5 m deep → 403 × 165 */}
+        <rect x={PAD_X}          y={VH / 2 - 165} width={165} height={330} />
+        {/* Left goal area: 18.32 m wide × 5.5 m deep → 183 × 55 */}
+        <rect x={PAD_X}          y={VH / 2 - 92}  width={55}  height={184} />
+        {/* Right penalty area */}
+        <rect x={VW - PAD_X - 165} y={VH / 2 - 165} width={165} height={330} />
+        {/* Right goal area */}
+        <rect x={VW - PAD_X - 55}  y={VH / 2 - 92}  width={55}  height={184} />
       </g>
       {players.map((p, idx) => {
-        const cx = 20 + ((W - 40) * p.x) / 100;
-        const cy = 14 + ((H - 28) * p.y) / 100;
-        const r  = W < 280 ? 4.5 : 6;
+        // p.x and p.y are 0–100 percentages of the actual pitch area
+        const cx = PAD_X + (fieldW * p.x) / 100;
+        const cy = PAD_Y + (fieldH * p.y) / 100;
 
         if (p.role === "ball") return (
           <g key={`ball-${idx}`}>
@@ -63,8 +89,8 @@ function PitchSVG({ players, names, W, H }: {
 
         if (p.role === "referee") return (
           <g key={`ref-${idx}`}>
-            <circle cx={cx} cy={cy} r={r} fill="#facc15" stroke="rgba(0,0,0,0.4)" strokeWidth="1" />
-            <text x={cx} y={cy + r * 0.5} textAnchor="middle" fontSize={r * 1.1} fontWeight="900" fill="#000">R</text>
+            <circle cx={cx} cy={cy} r={r} fill="#facc15" stroke="rgba(0,0,0,0.4)" strokeWidth="2" />
+            <text x={cx} y={cy + r * 0.45} textAnchor="middle" fontSize={r * 1.1} fontWeight="900" fill="#000">R</text>
           </g>
         );
 
@@ -75,9 +101,9 @@ function PitchSVG({ players, names, W, H }: {
         return (
           <g key={`p-${p.id}-${idx}`}>
             <circle cx={cx} cy={cy} r={r * 1.5} fill={color} opacity={0.18} />
-            <circle cx={cx} cy={cy} r={r} fill={color} stroke="rgba(0,0,0,0.5)" strokeWidth="1" />
+            <circle cx={cx} cy={cy} r={r} fill={color} stroke="rgba(0,0,0,0.5)" strokeWidth="2" />
             {W >= 280 && (
-              <text x={cx} y={cy + r * 0.5} textAnchor="middle" fontSize={r * 1.1} fontWeight="900" fill="white">
+              <text x={cx} y={cy + r * 0.45} textAnchor="middle" fontSize={r * 1.1} fontWeight="900" fill="white">
                 {label}
               </text>
             )}
@@ -86,7 +112,7 @@ function PitchSVG({ players, names, W, H }: {
       })}
       <defs>
         <filter id="bGlow" x="-50%" y="-50%" width="200%" height="200%">
-          <feGaussianBlur stdDeviation="2" result="blur" />
+          <feGaussianBlur stdDeviation="5" result="blur" />
           <feMerge><feMergeNode in="blur" /><feMergeNode in="SourceGraphic" /></feMerge>
         </filter>
       </defs>
@@ -234,7 +260,7 @@ export default function PitchRadar({
             overflow: "hidden",
             position: "relative",
           }}>
-            <PitchSVG players={players} names={names} W={W} H={H} />
+            <PitchSVG players={players} names={names} W={W} />
             {/* Resize grip */}
             <div
               onMouseDown={onResizeDown}
@@ -286,7 +312,7 @@ export default function PitchRadar({
   }
 
   /* ── Standalone (old tab) mode ── */
-  const W = 620, H = 380;
+  const W = 620;
   return (
     <div>
       <div style={{ marginBottom: "1.5rem" }}>
@@ -312,8 +338,8 @@ export default function PitchRadar({
         ))}
       </div>
       <div style={{ width: "100%", overflowX: "auto", borderRadius: "0.75rem", overflow: "hidden" }}>
-        <div style={{ width: W, height: H }}>
-          <PitchSVG players={players} names={names} W={W} H={H} />
+        <div style={{ width: W, aspectRatio: "105 / 68" }}>
+          <PitchSVG players={players} names={names} W={W} />
         </div>
       </div>
       <p style={{ fontSize: "0.75rem", color: "#444", marginTop: "0.75rem", textAlign: "center" }}>

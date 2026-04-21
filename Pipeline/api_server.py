@@ -62,18 +62,28 @@ from dotenv import load_dotenv          # noqa: E402
 load_dotenv(PIPELINE_DIR / ".env")
 
 # ── Pre-loaded detection models (loaded once at startup, reused every pipeline run) ──
-_player_model = None
-_field_model  = None
+_player_model  = None
+_field_model   = None
+_models_ready  = False   # set to True once models are loaded and warmed up
 
 
 def _load_models():
-    global _player_model, _field_model
+    global _player_model, _field_model, _models_ready
     from inference import get_model  # noqa: PLC0415
     api_key = os.getenv("ROBOFLOW_API_KEY")
     print("[MatchIQ] Loading player detection model...")
     _player_model = get_model(model_id="football-vgiqa-3njno/2", api_key=api_key)
     print("[MatchIQ] Loading field detection model...")
     _field_model  = get_model(model_id="football-field-detection-f07vi/14", api_key=api_key)
+    print("[MatchIQ] Warming up models (first-inference JIT)...")
+    try:
+        import numpy as _np
+        _dummy = _np.zeros((64, 64, 3), dtype=_np.uint8)
+        _player_model.infer(_dummy, confidence=0.3)
+        _field_model.infer(_dummy, confidence=0.3)
+    except Exception as _e:
+        print(f"[MatchIQ] Warmup warning (non-fatal): {_e}")
+    _models_ready = True
     print("[MatchIQ] Models ready.")
 
 
@@ -184,6 +194,7 @@ def _norm_pct(px, py):
 _frame_queue: queue.Queue = queue.Queue(maxsize=60)
 _orig_video_writer = None          # saved reference during cv2 patch
 _latest_positions: list = []       # live tracking rows for /stream/positions
+_mjpeg_client_count: int = 0       # number of active /stream/frames consumers
 
 # ── WebSocket connection manager ───────────────────────────────────────────────
 # Each entry is (WebSocket, asyncio.AbstractEventLoop)
@@ -214,12 +225,13 @@ class _StreamingVideoWriter:
 
     def write(self, frame):
         self._w.write(frame)
-        ok, jpg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 60])
-        if ok:
-            try:
-                _frame_queue.put_nowait(jpg.tobytes())
-            except queue.Full:
-                pass   # drop frame — consumer is too slow
+        if _mjpeg_client_count > 0:   # skip JPEG encode when no client is watching
+            ok, jpg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 60])
+            if ok:
+                try:
+                    _frame_queue.put_nowait(jpg.tobytes())
+                except queue.Full:
+                    pass   # drop frame — consumer is too slow
 
     def release(self):
         self._w.release()
@@ -341,7 +353,7 @@ app = FastAPI(title="MatchIQ API", version="1.0.0")
 
 @app.on_event("startup")
 def startup_load_models():
-    _load_models()
+    threading.Thread(target=_load_models, daemon=True, name="model-loader").start()
 
 
 app.add_middleware(
@@ -373,6 +385,8 @@ async def upload_video(file: UploadFile = File(...)):
 # ── POST /run ──────────────────────────────────────────────────────────────────
 @app.post("/run")
 def run_pipeline():
+    if not _models_ready:
+        raise HTTPException(status_code=503, detail="Models are still loading, please wait")
     with _lock:
         if _STATUS["running"]:
             raise HTTPException(status_code=409, detail="Pipeline already running")
@@ -397,7 +411,9 @@ def cancel_pipeline():
 @app.get("/status")
 def get_status():
     with _lock:
-        return dict(_STATUS)
+        status = dict(_STATUS)
+    status["models_ready"] = _models_ready
+    return status
 
 
 # ── WebSocket /ws — push status + live positions ──────────────────────────────
@@ -430,27 +446,33 @@ async def websocket_endpoint(ws: WebSocket):
 def stream_frames():
     """Returns a multipart/x-mixed-replace MJPEG stream.
     Browser <img> tags natively render this as a live video feed."""
+    global _mjpeg_client_count
 
     def generate():
-        while True:
-            try:
-                frame_bytes = _frame_queue.get(timeout=5.0)
-            except queue.Empty:
-                # Still waiting — check if we should give up
-                with _lock:
-                    if not _STATUS["streaming"]:
-                        break
-                continue
+        global _mjpeg_client_count
+        _mjpeg_client_count += 1
+        try:
+            while True:
+                try:
+                    frame_bytes = _frame_queue.get(timeout=5.0)
+                except queue.Empty:
+                    # Still waiting — check if we should give up
+                    with _lock:
+                        if not _STATUS["streaming"]:
+                            break
+                    continue
 
-            if frame_bytes is None:    # end-of-stream sentinel
-                break
+                if frame_bytes is None:    # end-of-stream sentinel
+                    break
 
-            yield (
-                b"--frame\r\n"
-                b"Content-Type: image/jpeg\r\n\r\n"
-                + frame_bytes
-                + b"\r\n"
-            )
+                yield (
+                    b"--frame\r\n"
+                    b"Content-Type: image/jpeg\r\n\r\n"
+                    + frame_bytes
+                    + b"\r\n"
+                )
+        finally:
+            _mjpeg_client_count -= 1
 
     return StreamingResponse(
         generate(),
@@ -643,15 +665,22 @@ def results_tracking():
     if not path.exists():
         return []
     df         = pd.read_csv(path)
-    last_frame = df["frame"].max()
+    # Use last frame that has at least one player/goalkeeper with valid pitch coords
+    player_df = df[df["role"].isin(["player", "goalkeeper"]) & df["pitch_x"].notna()]
+    if player_df.empty:
+        last_frame = df["frame"].max()
+    else:
+        last_frame = player_df["frame"].max()
     records    = []
+    vid_w = df["x"].max() if df["x"].notna().any() else 1920
+    vid_h = df["y"].max() if df["y"].notna().any() else 1080
     for _, row in df[df["frame"] == last_frame].iterrows():
         px, py = _norm_pct(row.get("pitch_x"), row.get("pitch_y"))
         if px is None:
-            raw_x = row.get("x", 960)
-            raw_y = row.get("y", 540)
-            px = round(float(raw_x) / 1920 * 100, 2) if pd.notna(raw_x) else 50.0
-            py = round(float(raw_y) / 1080 * 100, 2) if pd.notna(raw_y) else 50.0
+            raw_x = row.get("x", vid_w / 2)
+            raw_y = row.get("y", vid_h / 2)
+            px = round(float(raw_x) / vid_w * 100, 2) if pd.notna(raw_x) else 50.0
+            py = round(float(raw_y) / vid_h * 100, 2) if pd.notna(raw_y) else 50.0
         records.append({
             "id":   int(row["player_id"]),
             "team": int(row["team_id"]) if pd.notna(row.get("team_id")) else -1,
@@ -674,9 +703,13 @@ def results_tracking_frames():
     if df.empty:
         return {"fps": 25, "total_frames": 0, "frames": {}}
 
+    # Derive actual video resolution from pixel coordinates so the fallback is correct
+    vid_w = float(df["x"].max()) if df["x"].notna().any() else 1920.0
+    vid_h = float(df["y"].max()) if df["y"].notna().any() else 1080.0
+
     all_frames = sorted(df["frame"].unique())
     total = len(all_frames)
-    # Sample evenly to at most 1500 keyframes (~1 per second for a 60s clip at 25fps)
+    # Sample evenly to at most 1500 keyframes
     step = max(1, total // 1500)
     sampled = all_frames[::step]
 
@@ -687,10 +720,10 @@ def results_tracking_frames():
         for _, row in rows.iterrows():
             px, py = _norm_pct(row.get("pitch_x"), row.get("pitch_y"))
             if px is None:
-                raw_x = row.get("x", 960)
-                raw_y = row.get("y", 540)
-                px = round(float(raw_x) / 1920 * 100, 2) if pd.notna(raw_x) else 50.0
-                py = round(float(raw_y) / 1080 * 100, 2) if pd.notna(raw_y) else 50.0
+                raw_x = row.get("x", vid_w / 2)
+                raw_y = row.get("y", vid_h / 2)
+                px = round(float(raw_x) / vid_w * 100, 2) if pd.notna(raw_x) else 50.0
+                py = round(float(raw_y) / vid_h * 100, 2) if pd.notna(raw_y) else 50.0
             records.append({
                 "id":   int(row["player_id"]),
                 "team": int(row["team_id"]) if pd.notna(row.get("team_id")) else -1,
