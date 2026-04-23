@@ -195,6 +195,7 @@ _frame_queue: queue.Queue = queue.Queue(maxsize=60)
 _orig_video_writer = None          # saved reference during cv2 patch
 _latest_positions: list = []       # live tracking rows for /stream/positions
 _mjpeg_client_count: int = 0       # number of active /stream/frames consumers
+_mjpeg_count_lock = threading.Lock()
 
 # ── WebSocket connection manager ───────────────────────────────────────────────
 # Each entry is (WebSocket, asyncio.AbstractEventLoop)
@@ -202,6 +203,7 @@ _ws_clients: list = []
 _ws_lock = threading.Lock()
 
 import asyncio as _asyncio
+from contextlib import asynccontextmanager
 
 
 def _ws_broadcast(message: dict):
@@ -225,7 +227,9 @@ class _StreamingVideoWriter:
 
     def write(self, frame):
         self._w.write(frame)
-        if _mjpeg_client_count > 0:   # skip JPEG encode when no client is watching
+        with _mjpeg_count_lock:
+            has_clients = _mjpeg_client_count > 0
+        if has_clients:   # skip JPEG encode when no client is watching
             ok, jpg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 60])
             if ok:
                 try:
@@ -348,13 +352,13 @@ def _run_pipeline():
 
 
 # ── FastAPI app ────────────────────────────────────────────────────────────────
-app = FastAPI(title="MatchIQ API", version="1.0.0")
-
-
-@app.on_event("startup")
-def startup_load_models():
+@asynccontextmanager
+async def _lifespan(app):
     threading.Thread(target=_load_models, daemon=True, name="model-loader").start()
+    yield
 
+
+app = FastAPI(title="MatchIQ API", version="1.0.0", lifespan=_lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -450,7 +454,8 @@ def stream_frames():
 
     def generate():
         global _mjpeg_client_count
-        _mjpeg_client_count += 1
+        with _mjpeg_count_lock:
+            _mjpeg_client_count += 1
         try:
             while True:
                 try:
@@ -472,7 +477,8 @@ def stream_frames():
                     + b"\r\n"
                 )
         finally:
-            _mjpeg_client_count -= 1
+            with _mjpeg_count_lock:
+                _mjpeg_client_count -= 1
 
     return StreamingResponse(
         generate(),
@@ -553,11 +559,11 @@ def _compute_outcome(csv_dir: Path) -> dict:
         return {}
 
     tracking  = pd.read_csv(tracking_path)
-    goal_prob = pd.read_csv(goal_path)
+    goal_df   = pd.read_csv(goal_path)
     movement  = pd.read_csv(movement_path)
 
     excl = _non_player_ids(csv_dir)
-    gp   = goal_prob[~goal_prob["player_id"].isin(excl)]
+    gp   = goal_df[~goal_df["player_id"].isin(excl)]
 
     # ── Shots (deduplicated per player with frame cooldown) ──────────────────
     shots: dict = {0: 0, 1: 0}
@@ -864,16 +870,19 @@ def saved_tracking(match_id: str):
     path = _match_dir(match_id) / "1_tracking.csv"
     if not path.exists():
         return []
-    df         = pd.read_csv(path)
-    last_frame = df["frame"].max()
-    records    = []
+    df = pd.read_csv(path)
+    player_df = df[df["role"].isin(["player", "goalkeeper"]) & df["pitch_x"].notna()]
+    last_frame = player_df["frame"].max() if not player_df.empty else df["frame"].max()
+    vid_w = float(df["x"].max()) if df["x"].notna().any() else 1920.0
+    vid_h = float(df["y"].max()) if df["y"].notna().any() else 1080.0
+    records = []
     for _, row in df[df["frame"] == last_frame].iterrows():
         px, py = _norm_pct(row.get("pitch_x"), row.get("pitch_y"))
         if px is None:
-            raw_x = row.get("x", 960)
-            raw_y = row.get("y", 540)
-            px = round(float(raw_x) / 1920 * 100, 2) if pd.notna(raw_x) else 50.0
-            py = round(float(raw_y) / 1080 * 100, 2) if pd.notna(raw_y) else 50.0
+            raw_x = row.get("x", vid_w / 2)
+            raw_y = row.get("y", vid_h / 2)
+            px = round(float(raw_x) / vid_w * 100, 2) if pd.notna(raw_x) else 50.0
+            py = round(float(raw_y) / vid_h * 100, 2) if pd.notna(raw_y) else 50.0
         records.append({
             "id":   int(row["player_id"]),
             "team": int(row["team_id"]) if pd.notna(row.get("team_id")) else -1,

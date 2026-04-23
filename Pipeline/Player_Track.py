@@ -1,4 +1,3 @@
-
 #REQUIRED PACKAGES
 #nvidia-smi
 #pip install -q inference-gpu
@@ -31,7 +30,8 @@ os.environ["CORE_MODEL_PE_ENABLED"] = "False"
 from dotenv import load_dotenv
 from inference import get_model
 import supervision as sv
-import trackers as tr
+from pathlib import Path
+from boxmot.trackers.hybridsort.hybridsort import HybridSort
 import numpy as np
 from sports.annotators.soccer import draw_pitch, draw_points_on_pitch
 from sports.configs.soccer import SoccerPitchConfiguration
@@ -66,6 +66,34 @@ ROBOFLOW_API_KEY = os.getenv("ROBOFLOW_API_KEY")
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 CONFIG = SoccerPitchConfiguration()
 
+_REID_WEIGHTS = Path(__file__).parent.parent / ".model_cache" / "osnet_x0_25_msmt17.pt"
+
+
+
+
+def _sv_to_boxmot(detections: sv.Detections) -> np.ndarray:
+    if len(detections) == 0:
+        return np.empty((0, 6), dtype=np.float32)
+    return np.column_stack([
+        detections.xyxy,
+        detections.confidence,
+        detections.class_id.astype(np.float32),
+    ]).astype(np.float32)
+
+
+def _boxmot_to_sv(tracks: np.ndarray) -> sv.Detections:
+    if tracks.shape[0] == 0:
+        empty = sv.Detections.empty()
+        empty.tracker_id = np.array([], dtype=int)
+        return empty
+    result = sv.Detections(
+        xyxy=tracks[:, 0:4],
+        confidence=tracks[:, 5],
+        class_id=tracks[:, 6].astype(int),
+    )
+    result.tracker_id = tracks[:, 4].astype(int)
+    return result
+
 
 class RealTimePlayerTracker:
     def __init__(self, source_video_path=SOURCE_VIDEO_PATH, confidence=CONFIDENCE, stride=30, min_crops=100):
@@ -82,16 +110,20 @@ class RealTimePlayerTracker:
             api_key=ROBOFLOW_API_KEY,
         )
         self.config = SoccerPitchConfiguration()
-        self.tracker = tr.OCSORTTracker(
-            lost_track_buffer=100,
-            frame_rate=25.0,
-            minimum_consecutive_frames=1,
-            minimum_iou_threshold=0.3,
-            direction_consistency_weight=0.2,
-            high_conf_det_threshold=0.6,
+        self.tracker = HybridSort(
+            reid_weights=_REID_WEIGHTS,
+            device=torch.device(self.device),
+            half=False,
+            track_thresh=0.3,
+            low_thresh=0.1,
+            max_age=100,
+            min_hits=3,
+            iou_threshold=0.3,
             delta_t=3,
+            use_byte=True,
+            with_reid=True,
+            with_longterm_reid=True,
         )
-        self.tracker.reset()
         self.team_classifier = None
         self.team_crops = []
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -139,7 +171,7 @@ class RealTimePlayerTracker:
 
         non_ball = detections[detections.class_id != BALL_ID]
         non_ball = non_ball.with_nms(threshold=0.5, class_agnostic=False)
-        non_ball = self.tracker.update(non_ball)
+        non_ball = _boxmot_to_sv(self.tracker.update(_sv_to_boxmot(non_ball), frame))
 
         goalkeepers = non_ball[non_ball.class_id == GOALKEEPER_ID]
         players = non_ball[non_ball.class_id == PLAYER_ID]
@@ -240,32 +272,35 @@ def resolve_goalkeepers_team_id(players, goalkeepers):
     return np.array(goalkeepers_team_id)
 
 
-
 def process_all_frames(PLAYER_DETECTION_MODEL, FIELD_DETECTION_MODEL, CONFIG, team_classifier, on_frame=None, cancel_event=None):
     ellipse_annotator = sv.EllipseAnnotator(
-    color=sv.ColorPalette.from_hex(['#00BFFF', '#FF1493', '#FFD700']),
-    thickness=2
+        color=sv.ColorPalette.from_hex(['#00BFFF', '#FF1493', '#FFD700']),
+        thickness=2
     )
     label_annotator = sv.LabelAnnotator(
-    color=sv.ColorPalette.from_hex(['#00BFFF', '#FF1493', '#FFD700']),
-    text_color=sv.Color.from_hex('#000000'),
-    text_position=sv.Position.BOTTOM_CENTER
+        color=sv.ColorPalette.from_hex(['#00BFFF', '#FF1493', '#FFD700']),
+        text_color=sv.Color.from_hex('#000000'),
+        text_position=sv.Position.BOTTOM_CENTER
     )
     triangle_annotator = sv.TriangleAnnotator(
-    color=sv.Color.from_hex('#FFD700'),
-    base=25, height=21, outline_thickness=1
+        color=sv.Color.from_hex('#FFD700'),
+        base=25, height=21, outline_thickness=1
     )
 
-    tracker = tr.OCSORTTracker(
-        lost_track_buffer=150,
-        frame_rate=25.0,
-        minimum_consecutive_frames=1,
-        minimum_iou_threshold=0.3,
-        direction_consistency_weight=0.2,
-        high_conf_det_threshold=0.6,
+    tracker = HybridSort(
+        reid_weights=_REID_WEIGHTS,
+        device=torch.device(DEVICE),
+        half=False,
+        track_thresh=0.3,
+        low_thresh=0.1,
+        max_age=5000,           # Keep long-term memory for 90‑minute matches
+        min_hits=3,
+        iou_threshold=0.3,
         delta_t=3,
+        use_byte=True,
+        with_reid=True,
+        with_longterm_reid=True,
     )
-    tracker.reset()
 
     video_info = sv.VideoInfo.from_video_path(SOURCE_VIDEO_PATH)
     out = cv2.VideoWriter(
@@ -291,6 +326,12 @@ def process_all_frames(PLAYER_DETECTION_MODEL, FIELD_DETECTION_MODEL, CONFIG, te
     TEAM_CLASSIFY_INTERVAL = 5
     team_id_cache: dict[int, int] = {}
 
+    # ========== Track history for preventing ID misuse ==========
+    track_last_pitch = {}      # track_id -> np.array([pitch_x, pitch_y])
+    track_team_history = {}    # track_id -> last assigned team (0 or 1)
+    MAX_PITCH_JUMP = 15.0      # metres – maximum plausible movement between frames
+    # =================================================================
+
     INFER_SIZE = 640
     orig_h, orig_w = None, None
 
@@ -299,7 +340,6 @@ def process_all_frames(PLAYER_DETECTION_MODEL, FIELD_DETECTION_MODEL, CONFIG, te
         total=video_info.total_frames,
         desc='Processing'
     ):
-        # Resize to model's native input size before inference; scale detections back afterward
         if orig_h is None:
             orig_h, orig_w = frame.shape[:2]
             scale_x, scale_y = orig_w / INFER_SIZE, orig_h / INFER_SIZE
@@ -308,7 +348,6 @@ def process_all_frames(PLAYER_DETECTION_MODEL, FIELD_DETECTION_MODEL, CONFIG, te
         # 1. Detect
         result = PLAYER_DETECTION_MODEL.infer(small_frame, confidence=CONFIDENCE)[0]
         detections = sv.Detections.from_inference(result)
-        # Scale bounding boxes back to original frame coordinates
         if len(detections) > 0:
             detections.xyxy[:, [0, 2]] *= scale_x
             detections.xyxy[:, [1, 3]] *= scale_y
@@ -320,18 +359,52 @@ def process_all_frames(PLAYER_DETECTION_MODEL, FIELD_DETECTION_MODEL, CONFIG, te
         # 3. Track players
         player_detections = detections[detections.class_id != BALL_ID]
         player_detections = player_detections.with_nms(threshold=0.5, class_agnostic=False)
-        player_detections = tracker.update(player_detections)
+        player_detections = _boxmot_to_sv(tracker.update(_sv_to_boxmot(player_detections), frame))
 
         # 4. Split by role BEFORE class_ids get changed
         goalkeepers = player_detections[player_detections.class_id == GOALKEEPER_ID]
         players     = player_detections[player_detections.class_id == PLAYER_ID]
         referees    = player_detections[player_detections.class_id == REFEREE_ID]
 
-        # remember tracker_ids per role for CSV saving later
         gk_ids  = set(goalkeepers.tracker_id.tolist()) if goalkeepers.tracker_id is not None else set()
         ref_ids = set(referees.tracker_id.tolist()) if referees.tracker_id is not None else set()
 
-        # 5. Classify teams (throttled — run every TEAM_CLASSIFY_INTERVAL frames)
+        # 5. Get pitch transformer (cached)
+        if frame_number % FIELD_REFRESH_INTERVAL == 0:
+            try:
+                result_field = FIELD_DETECTION_MODEL.infer(small_frame, confidence=0.3)[0]
+                key_points   = sv.KeyPoints.from_inference(result_field)
+                key_points.xy[0][:, 0] *= scale_x
+                key_points.xy[0][:, 1] *= scale_y
+                kp_filter    = key_points.confidence[0] > 0.5
+                frame_ref    = key_points.xy[0][kp_filter]
+                pitch_ref    = np.array(CONFIG.vertices)[kp_filter]
+                if len(frame_ref) >= 4:
+                    cached_transformer = ViewTransformer(source=frame_ref, target=pitch_ref)
+            except:
+                pass
+        transformer = cached_transformer
+        has_transform = transformer is not None
+
+        # ---------- Prevent teleporting IDs (goalkeeper ID sharing fix) ----------
+        if has_transform and player_detections.tracker_id is not None:
+            positions = player_detections.get_anchors_coordinates(sv.Position.BOTTOM_CENTER)
+            pitch_positions = transformer.transform_points(positions)
+
+            new_ids = player_detections.tracker_id.copy()
+            for i, tid in enumerate(new_ids):
+                current_pos = pitch_positions[i]
+                if tid in track_last_pitch:
+                    dist = np.linalg.norm(current_pos - track_last_pitch[tid])
+                    if dist > MAX_PITCH_JUMP:
+                        # Teleport detected – assign a fresh ID
+                        new_id = max(player_detections.tracker_id.max() + 1, tid + 10000)
+                        new_ids[i] = new_id
+                track_last_pitch[new_ids[i]] = current_pos
+            player_detections.tracker_id = new_ids
+        # -------------------------------------------------------------------------
+
+        # 6. Classify teams (throttled)
         if len(players) > 0:
             if frame_number % TEAM_CLASSIFY_INTERVAL == 0:
                 player_crops = [sv.crop_image(frame, xyxy) for xyxy in players.xyxy]
@@ -350,23 +423,20 @@ def process_all_frames(PLAYER_DETECTION_MODEL, FIELD_DETECTION_MODEL, CONFIG, te
 
         player_detections = sv.Detections.merge([players, goalkeepers, referees])
 
-        # 6. Get pitch transformer (cached — refresh every FIELD_REFRESH_INTERVAL frames)
-        if frame_number % FIELD_REFRESH_INTERVAL == 0:
-            try:
-                result_field = FIELD_DETECTION_MODEL.infer(small_frame, confidence=0.3)[0]
-                key_points   = sv.KeyPoints.from_inference(result_field)
-                # Scale keypoints back to original frame coordinates
-                key_points.xy[0][:, 0] *= scale_x
-                key_points.xy[0][:, 1] *= scale_y
-                kp_filter    = key_points.confidence[0] > 0.5
-                frame_ref    = key_points.xy[0][kp_filter]
-                pitch_ref    = np.array(CONFIG.vertices)[kp_filter]
-                if len(frame_ref) >= 4:
-                    cached_transformer = ViewTransformer(source=frame_ref, target=pitch_ref)
-            except:
-                pass
-        transformer = cached_transformer
-        has_transform = transformer is not None
+        # ---------- Prevent team flips (additional safeguard) ----------
+        if player_detections.tracker_id is not None:
+            new_ids = player_detections.tracker_id.copy()
+            for i, tid in enumerate(new_ids):
+                team = player_detections.class_id[i]
+                if tid in track_team_history:
+                    if track_team_history[tid] != team and team != -1:
+                        # Team flip – split ID
+                        new_id = max(player_detections.tracker_id.max() + 1, tid + 20000)
+                        new_ids[i] = new_id
+                if team != -1:
+                    track_team_history[new_ids[i]] = team
+            player_detections.tracker_id = new_ids
+        # -----------------------------------------------------------------
 
         # 7. Save ball to CSV
         if len(ball_detections) > 0:
@@ -414,11 +484,8 @@ def process_all_frames(PLAYER_DETECTION_MODEL, FIELD_DETECTION_MODEL, CONFIG, te
                 })
 
         # Fire live positions callback for minimap streaming
-        # Built from this frame's detection arrays directly — O(players) not O(total_records)
         if on_frame is not None:
             live_rows = []
-
-            # Players and goalkeepers
             if player_detections.tracker_id is not None:
                 pp = player_detections.get_anchors_coordinates(sv.Position.BOTTOM_CENTER)
                 pp_pitch = transformer.transform_points(pp) if has_transform else None
@@ -426,7 +493,6 @@ def process_all_frames(PLAYER_DETECTION_MODEL, FIELD_DETECTION_MODEL, CONFIG, te
                     role = 'goalkeeper' if int(tid) in gk_ids else ('referee' if int(tid) in ref_ids else 'player')
                     if pp_pitch is not None:
                         try:
-                            # pitch coords are in metres (0–105 × 0–68) from ViewTransformer
                             nx = round(float(pp_pitch[i][0]) / 105 * 100, 2)
                             ny = round(float(pp_pitch[i][1]) / 68  * 100, 2)
                         except (TypeError, ValueError):
@@ -443,7 +509,6 @@ def process_all_frames(PLAYER_DETECTION_MODEL, FIELD_DETECTION_MODEL, CONFIG, te
                         'y':    max(0.0, min(100.0, ny)),
                     })
 
-            # Ball — broadcast it too so the minimap ball actually moves
             if len(ball_detections) > 0:
                 for xyxy in ball_detections.xyxy:
                     bx = float((xyxy[0] + xyxy[2]) / 2)
@@ -466,7 +531,7 @@ def process_all_frames(PLAYER_DETECTION_MODEL, FIELD_DETECTION_MODEL, CONFIG, te
                         'x':    max(0.0, min(100.0, bnx)),
                         'y':    max(0.0, min(100.0, bny)),
                     })
-                    break  # only first ball detection
+                    break
 
             on_frame(live_rows)
 
@@ -487,10 +552,9 @@ def process_all_frames(PLAYER_DETECTION_MODEL, FIELD_DETECTION_MODEL, CONFIG, te
             break
 
     out.release()
-    out = None  # prevent accidental double-release
+    out = None
 
-    # 10. Transcode raw mp4v → H.264 faststart so browsers can seek immediately.
-    #     Must decode+re-encode (not remux) because mp4v and H.264 are different codecs.
+    # 10. Transcode raw mp4v → H.264 faststart
     import av as _av, os as _os
     from fractions import Fraction as _Fraction
     try:
@@ -525,10 +589,7 @@ def process_all_frames(PLAYER_DETECTION_MODEL, FIELD_DETECTION_MODEL, CONFIG, te
     # 11. Save CSV
     df = pd.DataFrame(tracking_records)
 
-    # Smooth team_id per player over a rolling window to fix track-swap artefacts.
-    # A player whose team_id flips for fewer than SWAP_WINDOW frames is corrected
-    # back to their dominant team; avoids downstream misattribution when two players
-    # from opposite teams briefly occlude each other.
+    # Smooth team_id per player over a rolling window
     SWAP_WINDOW = 50
     players_mask = df['role'].isin(['player', 'goalkeeper']) & (df['team_id'] >= 0)
     if players_mask.any():
@@ -536,7 +597,6 @@ def process_all_frames(PLAYER_DETECTION_MODEL, FIELD_DETECTION_MODEL, CONFIG, te
             if len(group) < 2:
                 return group
             ids = group['team_id'].values.copy()
-            # Rolling majority: for each position, look at the surrounding SWAP_WINDOW frames
             smoothed = ids.copy()
             half = SWAP_WINDOW // 2
             for idx in range(len(ids)):
@@ -565,7 +625,6 @@ def process_all_frames(PLAYER_DETECTION_MODEL, FIELD_DETECTION_MODEL, CONFIG, te
 
 
 def player_tracking(player_model=None, field_model=None, on_frame=None, cancel_event=None):
-    # 1 Load models (skipped when pre-loaded models are passed in from api_server)
     if player_model is None:
         player_model = get_model(model_id="football-vgiqa-3njno/2", api_key=ROBOFLOW_API_KEY)
     if field_model is None:
@@ -574,7 +633,6 @@ def player_tracking(player_model=None, field_model=None, on_frame=None, cancel_e
     print(f"Using: {DEVICE}")
     STRIDE = 30
 
-    # 2 Collect player crops for team classification (stride-30 pass, capped at 150 crops)
     crops = []
     _bs_size = 640
     _bs_first = True
@@ -596,14 +654,12 @@ def player_tracking(player_model=None, field_model=None, on_frame=None, cancel_e
         player_only = detections[detections.class_id == PLAYER_ID]
         player_crops = [sv.crop_image(frame, xyxy) for xyxy in player_only.xyxy]
         crops += player_crops
-        if len(crops) >= 200:   # stop early — more crops don't improve KMeans
+        if len(crops) >= 200:
             break
 
-    # 3 Team classifier (must re-fit per video — jersey colours differ)
     team_classifier = TeamClassifier(device=DEVICE)
     team_classifier.fit(crops)
 
-    # 4 Detection on all frames
     process_all_frames(player_model, field_model, CONFIG, team_classifier, on_frame=on_frame, cancel_event=cancel_event)
 
     return
