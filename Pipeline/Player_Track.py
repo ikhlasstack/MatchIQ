@@ -772,7 +772,6 @@ class RealTimeTracker:
             text_color=sv.Color.from_hex('#000000'),
             text_position=sv.Position.BOTTOM_CENTER,
             text_scale=1,
-            text_padding=2
         )
         self._triangle_ann = sv.TriangleAnnotator(
             color=sv.Color.from_hex('#FFD700'),
