@@ -29,16 +29,19 @@ try:
 except Exception:
     pass
 
+import base64
 import io
 import json
 import queue
 import shutil
+import subprocess
 import threading
 import zipfile
 from datetime import datetime
 from pathlib import Path
 
 import cv2
+import numpy as np
 import pandas as pd
 from fastapi import Body, FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -65,6 +68,15 @@ load_dotenv(PIPELINE_DIR / ".env")
 _player_model  = None
 _field_model   = None
 _models_ready  = False   # set to True once models are loaded and warmed up
+
+# ── Real-time tracker (one shared instance; reset per session) ─────────────────
+_rt_tracker = None          # RealTimeTracker | None
+_rt_lock    = threading.Lock()
+_rt_frame_queue: queue.Queue = queue.Queue(maxsize=30)  # annotated JPEG bytes for /stream/realtime
+
+# ── Stream-capture state (one active stream session at a time) ─────────────────
+_stream_stop  = threading.Event()   # set to kill the capture thread
+_stream_thread: threading.Thread | None = None
 
 
 def _load_models():
@@ -420,6 +432,119 @@ def get_status():
     return status
 
 
+# ── Stream URL resolver ────────────────────────────────────────────────────────
+# Resolve binaries relative to the running Python so venv tools are always found
+_VENV_BIN = Path(sys.executable).parent
+_STREAMLINK = str(_VENV_BIN / "streamlink")
+_YTDLP      = str(_VENV_BIN / "yt-dlp")
+
+
+def _resolve_stream_url(url: str) -> str:
+    """Return a direct streamable URL using streamlink (live-first), falling back to yt-dlp."""
+    # 1. Try streamlink — best for live streams (YouTube Live, Twitch, etc.)
+    try:
+        result = subprocess.run(
+            [_STREAMLINK, "--stream-url", url, "best"],
+            capture_output=True, text=True, timeout=20,
+        )
+        direct = result.stdout.strip()
+        if direct and direct.startswith("http"):
+            return direct
+        if result.stderr:
+            print(f"[streamlink stderr] {result.stderr.strip()}")
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        print(f"[streamlink] {e}")
+
+    # 2. Fall back to yt-dlp — better for VODs
+    try:
+        result = subprocess.run(
+            [_YTDLP, "-g", "--no-playlist", "-f", "best[ext=mp4]/best", url],
+            capture_output=True, text=True, timeout=30,
+        )
+        direct = result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
+        if direct and direct.startswith("http"):
+            return direct
+        if result.stderr:
+            print(f"[yt-dlp stderr] {result.stderr.strip()}")
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        print(f"[yt-dlp] {e}")
+
+    raise RuntimeError("Could not resolve stream URL — streamlink and yt-dlp both failed")
+
+
+# ── Stream capture thread ──────────────────────────────────────────────────────
+def _stream_capture_thread(direct_url: str, ws: "WebSocket", loop: "_asyncio.AbstractEventLoop"):
+    """Read frames from a direct stream URL, run RealTimeTracker, push results over WS."""
+    global _rt_tracker
+
+    def _send(payload: dict):
+        text = json.dumps(payload)
+        try:
+            _asyncio.run_coroutine_threadsafe(ws.send_text(text), loop)
+        except Exception:
+            pass
+
+    # Reset tracker for a new session
+    with _rt_lock:
+        from Player_Track import RealTimeTracker  # noqa: PLC0415
+        _rt_tracker = RealTimeTracker(_player_model, _field_model)
+        tracker = _rt_tracker
+
+    cap = cv2.VideoCapture(direct_url)
+    if not cap.isOpened():
+        _send({"type": "rt_error", "detail": "cv2.VideoCapture could not open the stream URL"})
+        return
+
+    _send({"type": "rt_status", "status": "streaming"})
+
+    skip_count = 0
+
+    try:
+        while not _stream_stop.is_set():
+            ok, frame = cap.read()
+            if not ok:
+                # Live streams may stall briefly; VODs end here
+                break
+
+            # Skip frames if we're falling behind (keep latency low)
+            skip_count += 1
+            if skip_count % 2 != 0:   # process every other frame → ~TARGET_FPS/2 effective
+                continue
+
+            try:
+                jpeg_bytes, live_rows = tracker.process_frame(frame)
+            except Exception as exc:
+                _send({"type": "rt_error", "detail": str(exc)})
+                continue
+
+            if jpeg_bytes:
+                _send({"type": "rt_frame", "image": base64.b64encode(jpeg_bytes).decode()})
+            if live_rows:
+                _send({"type": "positions", "rows": live_rows})
+
+    finally:
+        cap.release()
+        _send({"type": "rt_status", "status": "stopped"})
+
+
+# ── Real-time frame processor (runs in thread-pool via asyncio) ────────────────
+def _process_rt_frame(jpeg_b64: str) -> tuple[bytes, list]:
+    """Decode a base64 JPEG, run RealTimeTracker, return (annotated_jpeg, live_rows)."""
+    global _rt_tracker
+    img_bytes = base64.b64decode(jpeg_b64)
+    arr       = np.frombuffer(img_bytes, dtype=np.uint8)
+    frame     = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if frame is None:
+        return b"", []
+    with _rt_lock:
+        if _rt_tracker is None:
+            from Player_Track import RealTimeTracker  # noqa: PLC0415
+            _rt_tracker = RealTimeTracker(_player_model, _field_model)
+        tracker = _rt_tracker
+    # Process outside the lock so other frames aren't held up
+    return tracker.process_frame(frame)
+
+
 # ── WebSocket /ws — push status + live positions ──────────────────────────────
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
@@ -436,13 +561,86 @@ async def websocket_endpoint(ws: WebSocket):
         await ws.send_text(json.dumps({"type": "positions", "rows": _latest_positions}))
     try:
         while True:
-            # Keep connection alive; client sends nothing, we just wait for disconnect
-            await ws.receive_text()
+            raw = await ws.receive_text()
+            try:
+                msg = json.loads(raw)
+            except Exception:
+                continue
+
+            if msg.get("type") == "frame":
+                b64 = msg.get("image", "")
+                if not b64:
+                    continue
+                if not _models_ready:
+                    await ws.send_text(json.dumps({"type": "rt_error", "detail": "Models not ready"}))
+                    continue
+                try:
+                    jpeg_bytes, live_rows = await _asyncio.get_event_loop().run_in_executor(
+                        None, _process_rt_frame, b64
+                    )
+                except Exception as exc:
+                    await ws.send_text(json.dumps({"type": "rt_error", "detail": str(exc)}))
+                    continue
+                if jpeg_bytes:
+                    ann_b64 = base64.b64encode(jpeg_bytes).decode()
+                    await ws.send_text(json.dumps({"type": "rt_frame", "image": ann_b64}))
+                if live_rows:
+                    await ws.send_text(json.dumps({"type": "positions", "rows": live_rows}))
+
+            elif msg.get("type") == "yt_start":
+                global _stream_stop, _stream_thread
+                url = msg.get("url", "").strip()
+                if not url:
+                    await ws.send_text(json.dumps({"type": "rt_error", "detail": "No URL provided"}))
+                    continue
+                if not _models_ready:
+                    await ws.send_text(json.dumps({"type": "rt_error", "detail": "Models not ready"}))
+                    continue
+
+                # Stop any existing stream
+                _stream_stop.set()
+                if _stream_thread and _stream_thread.is_alive():
+                    _stream_thread.join(timeout=5)
+
+                await ws.send_text(json.dumps({"type": "rt_status", "status": "resolving"}))
+
+                try:
+                    direct_url = await _asyncio.get_event_loop().run_in_executor(
+                        None, _resolve_stream_url, url
+                    )
+                except Exception as exc:
+                    await ws.send_text(json.dumps({"type": "rt_error", "detail": str(exc)}))
+                    continue
+
+                _stream_stop.clear()
+                _stream_thread = threading.Thread(
+                    target=_stream_capture_thread,
+                    args=(direct_url, ws, loop),
+                    daemon=True,
+                    name="stream-capture",
+                )
+                _stream_thread.start()
+
+            elif msg.get("type") == "yt_stop":
+                _stream_stop.set()
+                await ws.send_text(json.dumps({"type": "rt_status", "status": "stopped"}))
+
     except WebSocketDisconnect:
         pass
     finally:
+        _stream_stop.set()   # kill capture thread if this client owned it
         with _ws_lock:
             _ws_clients[:] = [(w, l) for w, l in _ws_clients if w is not ws]
+
+
+# ── POST /realtime/reset — reset the real-time tracker state ──────────────────
+@app.post("/realtime/reset")
+def reset_realtime():
+    """Reset the RealTimeTracker so a new session starts with clean state."""
+    global _rt_tracker
+    with _rt_lock:
+        _rt_tracker = None
+    return {"ok": True}
 
 
 # ── GET /stream/frames — live MJPEG during tracking ───────────────────────────

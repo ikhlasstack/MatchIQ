@@ -9,9 +9,9 @@ import {
 } from "recharts";
 
 /* ── palette ─────────────────────────────────────────────── */
-const API  = "http://localhost:8000";
-const T0   = "#3b82f6";
-const T1   = "#f43f5e";
+const API = "http://localhost:8000";
+const T0 = "#3b82f6";
+const T1 = "#f43f5e";
 const GOLD = "#D4AF37";
 
 /* ── API types ───────────────────────────────────────────── */
@@ -19,25 +19,25 @@ interface MatchMeta {
   id: string; name: string; date: string;
   duration: string; frames: number; players: number;
 }
-interface FatigueRow  { label: string; score: number; level: string; team: number; }
+interface FatigueRow { label: string; score: number; level: string; team: number; }
 interface GoalProbRow { frame: number; t0: number; t1: number; }
 interface OutcomeData {
   winA: number; draw: number; winB: number;
   possession: { t0: number; t1: number };
-  shots:      { t0: number; t1: number };
-  territory:  { t0: number; t1: number };
-  momentum:   { t0: number; t1: number };
+  shots: { t0: number; t1: number };
+  territory: { t0: number; t1: number };
+  momentum: { t0: number; t1: number };
 }
 
 /* ── Derived analytics state ─────────────────────────────── */
 interface AnalyticsState {
-  outcome:    OutcomeData;
-  fatigue:    FatigueRow[];
-  goalProb:   GoalProbRow[];
-  radarData:  { metric: string; t0: number; t1: number }[];
-  barData:    { name: string; T0: number; T1: number }[];
+  outcome: OutcomeData;
+  fatigue: FatigueRow[];
+  goalProb: GoalProbRow[];
+  radarData: { metric: string; t0: number; t1: number }[];
+  barData: { name: string; T0: number; T1: number }[];
   possession: { minute: number; t0: number; t1: number }[];
-  momentum:   { minute: number; t0: number; t1: number }[];
+  momentum: { minute: number; t0: number; t1: number }[];
   stats: {
     t0: { possession: number; shots: number; territory: number; momentum: number; avgFatigue: number };
     t1: { possession: number; shots: number; territory: number; momentum: number; avgFatigue: number };
@@ -119,37 +119,37 @@ function buildAnalytics(
 
   const radarData = [
     { metric: "Possession", t0: outcome.possession.t0, t1: outcome.possession.t1 },
-    { metric: "Shots",      t0: Math.min(100, outcome.shots.t0 * 8), t1: Math.min(100, outcome.shots.t1 * 8) },
-    { metric: "Threat",     t0: Math.round((avgGP0 / gpSum) * 100), t1: Math.round((avgGP1 / gpSum) * 100) },
-    { metric: "Territory",  t0: outcome.territory.t0, t1: outcome.territory.t1 },
-    { metric: "Momentum",   t0: outcome.momentum.t0, t1: outcome.momentum.t1 },
-    { metric: "Fitness",    t0: Math.max(0, 100 - f0), t1: Math.max(0, 100 - f1) },
+    { metric: "Shots", t0: Math.min(100, outcome.shots.t0 * 8), t1: Math.min(100, outcome.shots.t1 * 8) },
+    { metric: "Threat", t0: Math.round((avgGP0 / gpSum) * 100), t1: Math.round((avgGP1 / gpSum) * 100) },
+    { metric: "Territory", t0: outcome.territory.t0, t1: outcome.territory.t1 },
+    { metric: "Momentum", t0: outcome.momentum.t0, t1: outcome.momentum.t1 },
+    { metric: "Fitness", t0: Math.max(0, 100 - f0), t1: Math.max(0, 100 - f1) },
   ];
 
   const barData = [
     { name: "Possession%", T0: outcome.possession.t0, T1: outcome.possession.t1 },
-    { name: "Territory%",  T0: outcome.territory.t0,  T1: outcome.territory.t1  },
-    { name: "Momentum%",   T0: outcome.momentum.t0,   T1: outcome.momentum.t1   },
-    { name: "Fitness%",    T0: Math.max(0, 100 - f0), T1: Math.max(0, 100 - f1) },
+    { name: "Territory%", T0: outcome.territory.t0, T1: outcome.territory.t1 },
+    { name: "Momentum%", T0: outcome.momentum.t0, T1: outcome.momentum.t1 },
+    { name: "Fitness%", T0: Math.max(0, 100 - f0), T1: Math.max(0, 100 - f1) },
   ];
 
   return {
     outcome, fatigue, goalProb, radarData, barData,
     possession: buildTimeline(goalProb, outcome),
-    momentum:   buildMomentumTimeline(goalProb, outcome),
+    momentum: buildMomentumTimeline(goalProb, outcome),
     stats: {
       t0: {
         possession: outcome.possession.t0,
-        shots:      outcome.shots.t0,
-        territory:  outcome.territory.t0,
-        momentum:   outcome.momentum.t0,
+        shots: outcome.shots.t0,
+        territory: outcome.territory.t0,
+        momentum: outcome.momentum.t0,
         avgFatigue: f0,
       },
       t1: {
         possession: outcome.possession.t1,
-        shots:      outcome.shots.t1,
-        territory:  outcome.territory.t1,
-        momentum:   outcome.momentum.t1,
+        shots: outcome.shots.t1,
+        territory: outcome.territory.t1,
+        momentum: outcome.momentum.t1,
         avgFatigue: f1,
       },
     },
@@ -164,8 +164,8 @@ function StatRow({
 }) {
   const t0Wins = higherBetter ? v0 > v1 : v0 < v1;
   const t1Wins = higherBetter ? v1 > v0 : v1 < v0;
-  const pct0   = Math.round((v0 / ((v0 + v1) || 1)) * 100);
-  const pct1   = 100 - pct0;
+  const pct0 = Math.round((v0 / ((v0 + v1) || 1)) * 100);
+  const pct1 = 100 - pct0;
 
   return (
     <div style={{ display: "grid", gridTemplateColumns: "1fr auto 1fr", gap: "1rem", alignItems: "center", padding: "0.9rem 0", borderBottom: "1px solid #1a1a1a" }}>
@@ -201,7 +201,7 @@ function TeamHeader({ team, name, stats }: {
   stats: { possession: number; shots: number; avgFatigue: number };
 }) {
   const color = team === 0 ? T0 : T1;
-  const wins  = team === 0 ? stats.possession > 50 : stats.possession < 50;
+  const wins = team === 0 ? stats.possession > 50 : stats.possession < 50;
 
   return (
     <motion.div
@@ -228,8 +228,8 @@ function TeamHeader({ team, name, stats }: {
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.5rem", marginTop: "1rem" }}>
         {([
           ["Possession", `${stats.possession}%`],
-          ["Shots",      stats.shots],
-          ["Avg Fatigue",`${stats.avgFatigue}%`],
+          ["Shots", stats.shots],
+          ["Avg Fatigue", `${stats.avgFatigue}%`],
         ] as [string, string | number][]).map(([k, v]) => (
           <div key={String(k)} style={{ background: "rgba(255,255,255,0.03)", borderRadius: "0.5rem", padding: "0.5rem" }}>
             <div style={{ fontSize: "1rem", fontWeight: 800, color }}>{v}</div>
@@ -262,14 +262,14 @@ interface NamesMap { players: Record<string, string>; teams: Record<string, stri
 
 /* ── main ─────────────────────────────────────────────────── */
 export default function AnalyticsClient() {
-  const [matches,   setMatches]   = useState<MatchMeta[]>([]);
-  const [matchId,   setMatchId]   = useState<string>("");
+  const [matches, setMatches] = useState<MatchMeta[]>([]);
+  const [matchId, setMatchId] = useState<string>("");
   const [analytics, setAnalytics] = useState<AnalyticsState | null>(null);
-  const [names,     setNames]     = useState<NamesMap>({ players: {}, teams: {} });
-  const [loading,   setLoading]   = useState(true);
-  const [fetching,  setFetching]  = useState(false);
-  const [error,     setError]     = useState<string | null>(null);
-  const [timeline,  setTimeline]  = useState<"possession" | "momentum">("possession");
+  const [names, setNames] = useState<NamesMap>({ players: {}, teams: {} });
+  const [loading, setLoading] = useState(true);
+  const [fetching, setFetching] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [timeline, setTimeline] = useState<"possession" | "momentum">("possession");
 
   const t0Name = names.teams["0"] || "Team 1";
   const t1Name = names.teams["1"] || "Team 2";
@@ -398,7 +398,7 @@ export default function AnalyticsClient() {
                   <Legend wrapperStyle={{ fontSize: "0.85rem", paddingTop: "1rem" }} />
                   <Tooltip
                     contentStyle={{ background: "#1a1a1a", border: "1px solid #2a2a2a", borderRadius: "6px", fontSize: "0.8rem" }}
-                    formatter={(v: number | string, name: string) => [`${v}`, name]}
+                    formatter={(v: number | any, name: string | any) => [`${v}`, name]}
                   />
                 </RadarChart>
               </ResponsiveContainer>
@@ -426,11 +426,11 @@ export default function AnalyticsClient() {
                 </div>
               </div>
 
-              <StatRow label="Possession"  v0={analytics.stats.t0.possession}  v1={analytics.stats.t1.possession}  unit="%" />
-              <StatRow label="Shots"       v0={analytics.stats.t0.shots}        v1={analytics.stats.t1.shots} />
-              <StatRow label="Territory"   v0={analytics.stats.t0.territory}    v1={analytics.stats.t1.territory}   unit="%" />
-              <StatRow label="Momentum"    v0={analytics.stats.t0.momentum}     v1={analytics.stats.t1.momentum}    unit="%" />
-              <StatRow label="Avg Fatigue" v0={analytics.stats.t0.avgFatigue}   v1={analytics.stats.t1.avgFatigue}  unit="%" higherBetter={false} />
+              <StatRow label="Possession" v0={analytics.stats.t0.possession} v1={analytics.stats.t1.possession} unit="%" />
+              <StatRow label="Shots" v0={analytics.stats.t0.shots} v1={analytics.stats.t1.shots} />
+              <StatRow label="Territory" v0={analytics.stats.t0.territory} v1={analytics.stats.t1.territory} unit="%" />
+              <StatRow label="Momentum" v0={analytics.stats.t0.momentum} v1={analytics.stats.t1.momentum} unit="%" />
+              <StatRow label="Avg Fatigue" v0={analytics.stats.t0.avgFatigue} v1={analytics.stats.t1.avgFatigue} unit="%" higherBetter={false} />
             </motion.div>
 
             {/* ── Possession / Momentum timeline ── */}
@@ -484,7 +484,7 @@ export default function AnalyticsClient() {
                     tickFormatter={v => `${v}%`} />
                   <Tooltip
                     contentStyle={{ background: "#1a1a1a", border: "1px solid #2a2a2a", borderRadius: "6px", fontSize: "0.8rem" }}
-                    formatter={(v: number | string, name: string) => [`${v}%`, name === "t0" ? t0Name : t1Name]}
+                    formatter={(v: number | any, name: string | any) => [`${v}%`, name === "t0" ? t0Name : t1Name]}
                     labelFormatter={l => `Min ${l}`}
                   />
                   <Legend formatter={v => v === "t0" ? t0Name : t1Name}
@@ -521,7 +521,7 @@ export default function AnalyticsClient() {
                   <YAxis domain={[0, 100]} tick={{ fill: "#555", fontSize: 11 }} axisLine={false} tickLine={false}
                     tickFormatter={v => `${v}%`} />
                   <Tooltip contentStyle={{ background: "#1a1a1a", border: "1px solid #2a2a2a", borderRadius: "6px", fontSize: "0.8rem" }}
-                    formatter={(v: number | string, name: string) => [`${v}%`, name]} />
+                    formatter={(v: number | any, name: string | any) => [`${v}%`, name]} />
                   <Legend wrapperStyle={{ fontSize: "0.8rem", paddingTop: "0.5rem" }} />
                   <Bar dataKey="T0" name={t0Name} fill={T0} radius={[4, 4, 0, 0]} barSize={36} />
                   <Bar dataKey="T1" name={t1Name} fill={T1} radius={[4, 4, 0, 0]} barSize={36} />

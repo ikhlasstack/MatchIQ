@@ -111,7 +111,7 @@ Raw Video (MP4)
 storing `_player_model` and `_field_model` as module globals. These are passed directly to
 `player_tracking(player_model=..., field_model=...)` each run to avoid re-download overhead.
 
-**Tracker — OC-SORT (switched from ByteTrack):**
+**Tracker — BoxMot HybridSort (using bytetrack within) (switched from ByteTrack):**
 The tracker was changed from `supervision.ByteTrack` to `tr.OCSORTTracker` from the
 `trackers` package (imported as `import trackers as tr`). Both `process_all_frames()`
 (batch path) and `RealTimePlayerTracker` (real-time path) now instantiate OCSORTTracker

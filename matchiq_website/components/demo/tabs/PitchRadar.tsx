@@ -39,6 +39,56 @@ const VH = 680;   // viewBox height (represents 68 m)
 const PAD_X = 20; // pitch border padding in viewBox units
 const PAD_Y = 14;
 
+/*
+ * Vertex positions from SoccerPitchConfiguration (normalized 0–1 over pitch length × width).
+ * Indices are 1-based to match the config's edge list.
+ */
+const PITCH_VERTS: [number, number][] = [
+  [0,      0     ], // 1
+  [0,      0.2071], // 2
+  [0,      0.3691], // 3
+  [0,      0.6309], // 4
+  [0,      0.7929], // 5
+  [0,      1     ], // 6
+  [0.0458, 0.3691], // 7
+  [0.0458, 0.6309], // 8
+  [0.0917, 0.5   ], // 9  (left penalty spot)
+  [0.1679, 0.2071], // 10
+  [0.1679, 0.3691], // 11
+  [0.1679, 0.6309], // 12
+  [0.1679, 0.7929], // 13
+  [0.5,    0     ], // 14
+  [0.5,    0.3693], // 15
+  [0.5,    0.6307], // 16
+  [0.5,    1     ], // 17
+  [0.8321, 0.2071], // 18
+  [0.8321, 0.3691], // 19
+  [0.8321, 0.6309], // 20
+  [0.8321, 0.7929], // 21
+  [0.9083, 0.5   ], // 22  (right penalty spot)
+  [0.9542, 0.3691], // 23
+  [0.9542, 0.6309], // 24
+  [1,      0     ], // 25
+  [1,      0.2071], // 26
+  [1,      0.3691], // 27
+  [1,      0.6309], // 28
+  [1,      0.7929], // 29
+  [1,      1     ], // 30
+];
+
+// Edges from SoccerPitchConfiguration.edges (1-based)
+const PITCH_EDGES: [number, number][] = [
+  [1,2],[2,3],[3,4],[4,5],[5,6],
+  [7,8],
+  [10,11],[11,12],[12,13],
+  [14,15],[15,16],[16,17],
+  [18,19],[19,20],[20,21],
+  [23,24],
+  [25,26],[26,27],[27,28],[28,29],[29,30],
+  [1,14],[2,10],[3,7],[4,8],[5,13],[6,17],
+  [14,25],[18,26],[23,27],[24,28],[21,29],[17,30],
+];
+
 function PitchSVG({ players, names, W }: {
   players: TrackingRow[];
   names?: NamesMap;
@@ -46,7 +96,14 @@ function PitchSVG({ players, names, W }: {
 }) {
   const fieldW = VW - PAD_X * 2;
   const fieldH = VH - PAD_Y * 2;
-  const r = W < 280 ? 14 : 18;   // dot radius in viewBox units
+  const r = W < 280 ? 14 : 18;
+
+  // Convert normalized pitch vertex to viewBox coords
+  const vx = (nx: number) => PAD_X + nx * fieldW;
+  const vy = (ny: number) => PAD_Y + ny * fieldH;
+
+  // Centre circle radius: 9.15m / 105m * fieldW
+  const ccR = (9.15 / 105) * fieldW;
 
   return (
     <svg
@@ -56,22 +113,24 @@ function PitchSVG({ players, names, W }: {
       xmlns="http://www.w3.org/2000/svg"
     >
       <rect width={VW} height={VH} fill="#052e16" rx="6" />
-      <g stroke="#166534" strokeWidth="4" fill="none">
-        {/* Outer boundary */}
-        <rect x={PAD_X} y={PAD_Y} width={fieldW} height={fieldH} rx="2" />
-        {/* Halfway line */}
-        <line x1={VW / 2} y1={PAD_Y} x2={VW / 2} y2={VH - PAD_Y} />
-        {/* Centre circle — radius ~9.15 m → 91.5 viewBox units */}
-        <circle cx={VW / 2} cy={VH / 2} r={92} />
-        <circle cx={VW / 2} cy={VH / 2} r="6" fill="#166534" />
-        {/* Left penalty area: 40.32 m wide × 16.5 m deep → 403 × 165 */}
-        <rect x={PAD_X}          y={VH / 2 - 165} width={165} height={330} />
-        {/* Left goal area: 18.32 m wide × 5.5 m deep → 183 × 55 */}
-        <rect x={PAD_X}          y={VH / 2 - 92}  width={55}  height={184} />
-        {/* Right penalty area */}
-        <rect x={VW - PAD_X - 165} y={VH / 2 - 165} width={165} height={330} />
-        {/* Right goal area */}
-        <rect x={VW - PAD_X - 55}  y={VH / 2 - 92}  width={55}  height={184} />
+      <g stroke="#166534" strokeWidth="3" fill="none">
+        {/* Pitch lines from SoccerPitchConfiguration edges */}
+        {PITCH_EDGES.map(([a, b], i) => (
+          <line key={i}
+            x1={vx(PITCH_VERTS[a-1][0])} y1={vy(PITCH_VERTS[a-1][1])}
+            x2={vx(PITCH_VERTS[b-1][0])} y2={vy(PITCH_VERTS[b-1][1])}
+          />
+        ))}
+        {/* Centre circle */}
+        <circle cx={vx(0.5)} cy={vy(0.5)} r={ccR} />
+        {/* Centre spot */}
+        <circle cx={vx(0.5)} cy={vy(0.5)} r={5} fill="#166534" stroke="#166534" />
+        {/* Penalty spots (vertices 9 and 22) */}
+        <circle cx={vx(PITCH_VERTS[8][0])}  cy={vy(PITCH_VERTS[8][1])}  r={5} fill="#166534" stroke="none" />
+        <circle cx={vx(PITCH_VERTS[21][0])} cy={vy(PITCH_VERTS[21][1])} r={5} fill="#166534" stroke="none" />
+        {/* Goals (extending beyond the pitch boundary) */}
+        <rect x={PAD_X - 18} y={vy(0.3691)} width={18} height={vy(0.6309) - vy(0.3691)} stroke="#166534" fill="rgba(255,255,255,0.05)" />
+        <rect x={vx(1)}      y={vy(0.3691)} width={18} height={vy(0.6309) - vy(0.3691)} stroke="#166534" fill="rgba(255,255,255,0.05)" />
       </g>
       {players.map((p, idx) => {
         // p.x and p.y are 0–100 percentages of the actual pitch area
