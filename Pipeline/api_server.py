@@ -144,6 +144,9 @@ def _save_match(original_name: str):
     if TRACKED_VIDEO.exists():
         shutil.copy2(TRACKED_VIDEO, match_dir / "tracked_output.mp4")
 
+    if INPUT_VIDEO.exists():
+        shutil.copy2(INPUT_VIDEO, match_dir / "source_video.mp4")
+
     # Derive stats from tracking CSV
     tracking_csv = match_dir / "1_tracking.csv"
     frames, players, duration_str = 0, 0, "00:00"
@@ -1299,6 +1302,55 @@ def apply_corrections(match_id: str, payload: dict = Body(...)):
         raise HTTPException(status_code=500, detail=f"CSV recalculation failed: {exc}")
 
     return {"ok": True}
+
+
+# ── POST /matches/{match_id}/rerender ─────────────────────────────────────────
+@app.post("/matches/{match_id}/rerender")
+def rerender_match_video(match_id: str):
+    """Re-annotate the saved source video using the (corrected) tracking CSV.
+
+    Streams Server-Sent Events: { pct: 0-100 } while rendering,
+    then { done: true } when the new tracked_output.mp4 is ready.
+    """
+    d = _match_dir(match_id)
+    source  = d / "source_video.mp4"
+    csv     = d / "1_tracking.csv"
+    output  = d / "tracked_output.mp4"
+
+    if not source.exists():
+        raise HTTPException(status_code=404, detail="Source video not found for this match (was it saved before this feature was added?)")
+    if not csv.exists():
+        raise HTTPException(status_code=404, detail="Tracking CSV not found")
+
+    progress_queue: queue.Queue = queue.Queue()
+
+    def _run():
+        try:
+            from Player_Track import rerender_video  # noqa: PLC0415
+            rerender_video(
+                source_video=str(source),
+                tracking_csv=str(csv),
+                output_video=str(output),
+                on_progress=lambda pct: progress_queue.put({"pct": round(pct, 1)}),
+            )
+        except Exception as exc:
+            progress_queue.put({"error": str(exc)})
+        finally:
+            progress_queue.put(None)  # sentinel
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+
+    def _stream():
+        while True:
+            msg = progress_queue.get()
+            if msg is None:
+                yield "data: " + json.dumps({"done": True}) + "\n\n"
+                break
+            yield "data: " + json.dumps(msg) + "\n\n"
+
+    return StreamingResponse(_stream(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 # ── GET /matches/{match_id}/video ──────────────────────────────────────────────

@@ -64,6 +64,9 @@ export default function PlayerNamingModal({
   const [applying,      setApplying]      = useState(false);
   const [applyDone,     setApplyDone]     = useState(false);
   const [applyError,    setApplyError]    = useState<string | null>(null);
+  const [rerendering,   setRerendering]   = useState(false);
+  const [renderPct,     setRenderPct]     = useState(0);
+  const [renderError,   setRenderError]   = useState<string | null>(null);
 
   const players   = buildPlayerList(fatigueData, trackingData);
   const playerIds = players.map(p => p.id);
@@ -167,6 +170,7 @@ export default function PlayerNamingModal({
     if (!hasTeam && !hasRole && !hasMerge) return;
     setApplying(true);
     setApplyError(null);
+    setRenderError(null);
     try {
       const res = await fetch(`${API}/matches/${matchId}/corrections`, {
         method: "POST",
@@ -187,7 +191,41 @@ export default function PlayerNamingModal({
       setTeamOverrides({});
       setRoleOverrides({});
       setIdMerges([]);
-      onCorrectionsApplied?.();
+
+      // Kick off video rerender
+      setRerendering(true);
+      setRenderPct(0);
+      try {
+        const rrRes = await fetch(`${API}/matches/${matchId}/rerender`, { method: "POST" });
+        if (!rrRes.ok || !rrRes.body) {
+          setRenderError("Rerender failed to start");
+          setRerendering(false);
+          onCorrectionsApplied?.();
+          return;
+        }
+        const reader = rrRes.body.getReader();
+        const dec = new TextDecoder();
+        let buf = "";
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += dec.decode(value, { stream: true });
+          const lines = buf.split("\n");
+          buf = lines.pop() ?? "";
+          for (const line of lines) {
+            if (!line.startsWith("data:")) continue;
+            const msg = JSON.parse(line.slice(5).trim());
+            if (msg.pct !== undefined) setRenderPct(msg.pct);
+            if (msg.error) { setRenderError(msg.error); break; }
+            if (msg.done) { setRenderPct(100); }
+          }
+        }
+      } catch {
+        setRenderError("Rerender connection lost");
+      } finally {
+        setRerendering(false);
+        onCorrectionsApplied?.();
+      }
     } finally {
       setApplying(false);
     }
@@ -202,7 +240,7 @@ export default function PlayerNamingModal({
 
   return (
     <div
-      onClick={e => { if (e.target === e.currentTarget) onClose(); }}
+      onClick={e => { if (e.target === e.currentTarget && !rerendering) onClose(); }}
       style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.75)", zIndex: 200, display: "flex", alignItems: "center", justifyContent: "center", padding: "1rem" }}
     >
       <div style={{ background: "#111", border: "1px solid #2a2a2a", borderRadius: "1.25rem", width: "100%", maxWidth: "760px", maxHeight: "90vh", display: "flex", flexDirection: "column" }}>
@@ -365,22 +403,42 @@ export default function PlayerNamingModal({
               {applyError}
             </div>
           )}
+
+          {(rerendering || renderPct === 100) && !renderError && (
+            <div style={{ padding: "0.75rem 1rem", background: "#0d1a0d", border: "1px solid #22c55e44", borderRadius: "0.6rem" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.4rem" }}>
+                <span style={{ fontSize: "0.78rem", color: "#22c55e", fontWeight: 600 }}>
+                  {renderPct < 100 ? "Re-rendering video…" : "Video ready"}
+                </span>
+                <span style={{ fontSize: "0.72rem", color: "#22c55e88" }}>{renderPct.toFixed(0)}%</span>
+              </div>
+              <div style={{ height: 4, background: "#1a1a1a", borderRadius: 2, overflow: "hidden" }}>
+                <div style={{ height: "100%", width: `${renderPct}%`, background: "#22c55e", borderRadius: 2, transition: "width 0.4s ease" }} />
+              </div>
+            </div>
+          )}
+
+          {renderError && (
+            <div style={{ padding: "0.6rem 0.9rem", background: "#2a0a0a", border: "1px solid #f43f5e44", borderRadius: "0.5rem", color: "#f43f5e", fontSize: "0.8rem" }}>
+              Rerender: {renderError}
+            </div>
+          )}
         </div>
 
         {/* Footer */}
         <div style={{ padding: "1rem 1.5rem", borderTop: "1px solid #1a1a1a", display: "flex", justifyContent: "space-between", alignItems: "center", gap: "0.75rem", flexWrap: "wrap" }}>
-          <button onClick={onClose} style={{ padding: "0.5rem 1.25rem", borderRadius: "0.6rem", background: "transparent", border: "1px solid #2a2a2a", color: "#888", fontSize: "0.875rem", cursor: "pointer", fontWeight: 600 }}>
+          <button onClick={onClose} disabled={rerendering} style={{ padding: "0.5rem 1.25rem", borderRadius: "0.6rem", background: "transparent", border: "1px solid #2a2a2a", color: rerendering ? "#444" : "#888", fontSize: "0.875rem", cursor: rerendering ? "not-allowed" : "pointer", fontWeight: 600 }}>
             Skip
           </button>
           <div style={{ display: "flex", gap: "0.6rem" }}>
             <button
               onClick={handleApplyCorrections}
-              disabled={applying || !hasPendingCorrections}
+              disabled={applying || rerendering || !hasPendingCorrections}
               title={!hasPendingCorrections ? "No pending corrections" : undefined}
-              style={{ display: "flex", alignItems: "center", gap: "0.4rem", padding: "0.5rem 1.1rem", borderRadius: "0.6rem", background: applyDone ? "#22c55e" : "#1a1a1a", border: `1px solid ${applyDone ? "#22c55e" : hasPendingCorrections ? "#D4AF37" : "#2a2a2a"}`, color: applyDone ? "#000" : hasPendingCorrections ? "#D4AF37" : "#555", fontSize: "0.875rem", cursor: (applying || !hasPendingCorrections) ? "not-allowed" : "pointer", fontWeight: 700, opacity: applying ? 0.7 : 1, transition: "all 0.3s" }}
+              style={{ display: "flex", alignItems: "center", gap: "0.4rem", padding: "0.5rem 1.1rem", borderRadius: "0.6rem", background: applyDone ? "#22c55e" : "#1a1a1a", border: `1px solid ${applyDone ? "#22c55e" : hasPendingCorrections ? "#D4AF37" : "#2a2a2a"}`, color: applyDone ? "#000" : hasPendingCorrections ? "#D4AF37" : "#555", fontSize: "0.875rem", cursor: (applying || rerendering || !hasPendingCorrections) ? "not-allowed" : "pointer", fontWeight: 700, opacity: (applying || rerendering) ? 0.7 : 1, transition: "all 0.3s" }}
             >
-              <RefreshCw size={13} style={{ animation: applying ? "spin 1s linear infinite" : "none" }} />
-              {applyDone ? "Applied!" : applying ? "Recalculating…" : "Apply Corrections"}
+              <RefreshCw size={13} style={{ animation: (applying || rerendering) ? "spin 1s linear infinite" : "none" }} />
+              {applyDone ? "Applied!" : applying ? "Recalculating…" : rerendering ? "Rendering…" : "Apply Corrections"}
             </button>
             <button
               onClick={handleSaveNames}

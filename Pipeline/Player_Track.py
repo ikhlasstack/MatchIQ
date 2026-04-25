@@ -334,7 +334,7 @@ def process_all_frames(PLAYER_DETECTION_MODEL, FIELD_DETECTION_MODEL, CONFIG, te
     gk_last_seen  = {}         # track_id -> last frame_number the GK was detected
     gk_pitch_side = {}         # track_id -> 'left' | 'right' | None, set once GK is seen near a goal
     _fresh_id_counter = [90000]
-    GK_MAX_GAP   = 90          # frames (~3s at 30fps) — gap longer than this = different GK
+    GK_MAX_GAP   = 1000          # frames (~3s at 30fps) — gap longer than this = different GK
     GK_SIDE_LO   = 25.0        # metres from left goal line to register as 'left' GK
     GK_SIDE_HI   = 80.0        # metres — to register as 'right' GK
     # =================================================================
@@ -667,6 +667,148 @@ def process_all_frames(PLAYER_DETECTION_MODEL, FIELD_DETECTION_MODEL, CONFIG, te
     print(f'Teams (players only): {df[df["role"].isin(["player","goalkeeper"])]["team_id"].value_counts().to_dict()}')
     print(f'\nSample rows:')
     print(df[df['role'] == 'player'][['frame','player_id','x','y','pitch_x','pitch_y','team_id']].head(8))
+
+
+def rerender_video(source_video: str, tracking_csv: str, output_video: str,
+                   on_progress=None, cancel_event=None):
+    """Re-annotate source_video using corrected tracking_csv data.
+
+    Reads team_id and role from the CSV per frame and draws ellipses + labels.
+    on_progress(pct: float) is called with 0–100 as each frame is written.
+    """
+    df = pd.read_csv(tracking_csv)
+    # Build a fast lookup: frame -> list of rows
+    frame_data: dict[int, list] = {}
+    for row in df.itertuples(index=False):
+        f = int(row.frame)
+        frame_data.setdefault(f, []).append(row)
+
+    ellipse_annotator = sv.EllipseAnnotator(
+        color=sv.ColorPalette.from_hex(['#00BFFF', '#FF1493', '#FFD700']),
+        thickness=2,
+    )
+    label_annotator = sv.LabelAnnotator(
+        color=sv.ColorPalette.from_hex(['#00BFFF', '#FF1493', '#FFD700']),
+        text_color=sv.Color.from_hex('#000000'),
+        text_position=sv.Position.BOTTOM_CENTER,
+    )
+    triangle_annotator = sv.TriangleAnnotator(
+        color=sv.Color.from_hex('#FFD700'),
+        base=25, height=21, outline_thickness=1,
+    )
+
+    video_info = sv.VideoInfo.from_video_path(source_video)
+    total = video_info.total_frames or 1
+
+    _raw = output_video.replace(".mp4", "_raw.mp4")
+    out = cv2.VideoWriter(
+        _raw,
+        cv2.VideoWriter_fourcc(*"mp4v"),
+        video_info.fps,
+        (video_info.width, video_info.height),
+    )
+
+    for i, frame in enumerate(sv.get_video_frames_generator(source_video)):
+        rows = frame_data.get(i, [])
+
+        # Split into players/gks, referees, ball
+        player_rows = [r for r in rows if r.role in ("player", "goalkeeper")]
+        ref_rows    = [r for r in rows if r.role == "referee"]
+        ball_rows   = [r for r in rows if r.role == "ball"]
+
+        annotated = frame.copy()
+
+        if player_rows:
+            xyxy_list, class_ids, tracker_ids, labels = [], [], [], []
+            for r in player_rows:
+                # bbox not stored in CSV — reconstruct a small box around (x, y)
+                bx, by = float(r.x), float(r.y)
+                half = 20
+                xyxy_list.append([bx - half, by - half * 2, bx + half, by])
+                tid  = int(r.player_id)
+                team = int(r.team_id) if int(r.team_id) >= 0 else 2
+                class_ids.append(team)
+                tracker_ids.append(tid)
+                labels.append(f"#{tid}")
+
+            det = sv.Detections(
+                xyxy=np.array(xyxy_list, dtype=np.float32),
+                class_id=np.array(class_ids, dtype=int),
+                confidence=np.ones(len(player_rows), dtype=np.float32),
+            )
+            det.tracker_id = np.array(tracker_ids, dtype=int)
+            annotated = ellipse_annotator.annotate(annotated, det)
+            annotated = label_annotator.annotate(annotated, det, labels)
+
+        if ref_rows:
+            ref_xyxy, ref_cls = [], []
+            for r in ref_rows:
+                bx, by = float(r.x), float(r.y)
+                half = 20
+                ref_xyxy.append([bx - half, by - half * 2, bx + half, by])
+                ref_cls.append(2)
+            ref_det = sv.Detections(
+                xyxy=np.array(ref_xyxy, dtype=np.float32),
+                class_id=np.array(ref_cls, dtype=int),
+                confidence=np.ones(len(ref_rows), dtype=np.float32),
+            )
+            annotated = ellipse_annotator.annotate(annotated, ref_det)
+
+        if ball_rows:
+            r = ball_rows[0]
+            bx, by = float(r.x), float(r.y)
+            ball_det = sv.Detections(
+                xyxy=np.array([[bx - 15, by - 15, bx + 15, by + 15]], dtype=np.float32),
+                class_id=np.array([2], dtype=int),
+                confidence=np.array([1.0], dtype=np.float32),
+            )
+            annotated = triangle_annotator.annotate(annotated, ball_det)
+
+        out.write(annotated)
+
+        if on_progress and i % 30 == 0:
+            on_progress(min(99.0, i / total * 100))
+
+        if cancel_event and cancel_event.is_set():
+            break
+
+    out.release()
+
+    # Transcode to H.264 faststart
+    import av as _av
+    from fractions import Fraction as _Fraction
+    try:
+        _inp = _av.open(_raw)
+        _in_stream = _inp.streams.video[0]
+        _int_fps = round(float(_in_stream.average_rate))
+        _frame_tb = _Fraction(1, _int_fps)
+        _out = _av.open(output_video, mode='w', options={'movflags': 'faststart'})
+        _out_stream = _out.add_stream('h264', rate=_int_fps)
+        _out_stream.width   = _in_stream.width
+        _out_stream.height  = _in_stream.height
+        _out_stream.pix_fmt = 'yuv420p'
+        _out_stream.options = {'crf': '23', 'preset': 'fast'}
+        _pts = 0
+        for _frame in _inp.decode(_in_stream):
+            _frame.pts = _pts
+            _frame.time_base = _frame_tb
+            _pts += 1
+            for _pkt in _out_stream.encode(_frame):
+                _out.mux(_pkt)
+        for _pkt in _out_stream.encode():
+            _out.mux(_pkt)
+        _inp.close()
+        _out.close()
+        import os as _os
+        _os.remove(_raw)
+    except Exception as _e:
+        import os as _os
+        print(f"[rerender] transcode failed ({_e}), keeping raw")
+        if _os.path.exists(_raw):
+            _os.replace(_raw, output_video)
+
+    if on_progress:
+        on_progress(100.0)
 
 
 def player_tracking(player_model=None, field_model=None, on_frame=None, cancel_event=None):
