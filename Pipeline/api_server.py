@@ -1221,6 +1221,86 @@ def put_names(match_id: str, payload: dict = Body(...)):
     return existing
 
 
+# ── POST /matches/{match_id}/corrections ─────────────────────────────────────
+@app.post("/matches/{match_id}/corrections")
+def apply_corrections(match_id: str, payload: dict = Body(...)):
+    """Rewrite player IDs and team assignments in the saved match CSVs, then
+    re-run all downstream pipeline steps so every CSV stays consistent.
+
+    Expected body:
+      {
+        "id_merges":      [{"from": 31, "to": 24}, ...],  // merge secondary ID into primary
+        "team_overrides": {"24": 1, "7": 0, ...},         // force team_id per player_id
+        "role_overrides": {"5": "goalkeeper", "9": "player", ...}  // force role per player_id
+      }
+
+    Steps:
+      1. Apply id_merges to 1_tracking.csv (rename player_id, keep primary team).
+      2. Apply team_overrides to 1_tracking.csv.
+      3. Apply role_overrides to 1_tracking.csv.
+      4. Re-run features(), fatigue(), goal_prob(), Match_Outcome() against the
+         saved match directory so all other CSVs are recalculated consistently.
+    """
+    d = _match_dir(match_id)
+    tracking_path = d / "1_tracking.csv"
+    if not tracking_path.exists():
+        raise HTTPException(status_code=404, detail="tracking CSV not found for this match")
+
+    id_merges: list      = payload.get("id_merges", [])       # [{"from": int, "to": int}]
+    team_overrides: dict = payload.get("team_overrides", {})   # {"pid_str": team_int}
+    role_overrides: dict = payload.get("role_overrides", {})   # {"pid_str": "goalkeeper"|"player"}
+
+    if not id_merges and not team_overrides and not role_overrides:
+        return {"ok": True, "message": "nothing to do"}
+
+    df = pd.read_csv(tracking_path)
+
+    # 1. Merge IDs — replace "from" player_id with "to" everywhere in the CSV.
+    #    The "to" player's team_id is kept (it's the canonical one).
+    for merge in id_merges:
+        src = int(merge["from"])
+        dst = int(merge["to"])
+        if src == dst:
+            continue
+        # Rows that belong to the secondary ID get rewritten to the primary ID.
+        # team_id for those rows is set to whatever the primary ID uses (mode).
+        primary_team = df.loc[df["player_id"] == dst, "team_id"].mode()
+        primary_team = int(primary_team.iloc[0]) if not primary_team.empty else None
+        mask = df["player_id"] == src
+        df.loc[mask, "player_id"] = dst
+        if primary_team is not None:
+            df.loc[mask, "team_id"] = primary_team
+
+    # 2. Team overrides
+    for pid_str, new_team in team_overrides.items():
+        pid = int(pid_str)
+        df.loc[df["player_id"] == pid, "team_id"] = int(new_team)
+
+    # 3. Role overrides
+    for pid_str, new_role in role_overrides.items():
+        pid = int(pid_str)
+        if new_role in ("goalkeeper", "player", "referee"):
+            df.loc[df["player_id"] == pid, "role"] = new_role
+
+    df.to_csv(tracking_path, index=False)
+
+    # 3. Re-run downstream pipeline against this match's directory
+    csv_dir_str = str(d)
+    try:
+        from Movement_Features import features      # noqa: PLC0415
+        from Fatigue           import fatigue       # noqa: PLC0415
+        from goal_prob         import goal_prob     # noqa: PLC0415
+        from Match_Outcome     import Match_Outcome # noqa: PLC0415
+        features(csv_dir=csv_dir_str)
+        fatigue(csv_dir=csv_dir_str)
+        goal_prob(csv_dir=csv_dir_str)
+        Match_Outcome(csv_dir=csv_dir_str)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"CSV recalculation failed: {exc}")
+
+    return {"ok": True}
+
+
 # ── GET /matches/{match_id}/video ──────────────────────────────────────────────
 @app.get("/matches/{match_id}/video")
 def saved_video(match_id: str):

@@ -46,42 +46,43 @@ export default function MatchResultsClient({ matchId }: { matchId: string }) {
   const [error,           setError]           = useState<string | null>(null);
   const [names,           setNames]           = useState<NamesMap>({ players: {}, teams: {} });
   const [showNaming,      setShowNaming]       = useState(false);
+  const [teamOverrides,   setTeamOverrides]   = useState<Record<number, number>>({});
+  const [roleOverrides,   setRoleOverrides]   = useState<Record<number, string>>({});
 
   const handleFrameChange = useCallback((f: number) => setCurrentFrame(f), []);
 
   const videoUrl    = `${API}/matches/${matchId}/video`;
   const downloadUrl = `${API}/matches/${matchId}/video`;
 
-  useEffect(() => {
-    async function load() {
-      try {
-        const [metaRes, fat, goal, out, track, allTrack, savedNames] = await Promise.all([
-          fetch(`${API}/matches/${matchId}`).then(r => {
-            if (!r.ok) throw new Error("Match not found");
-            return r.json();
-          }),
-          fetch(`${API}/matches/${matchId}/results/fatigue`).then(r => r.json()),
-          fetch(`${API}/matches/${matchId}/results/goal-prob`).then(r => r.json()),
-          fetch(`${API}/matches/${matchId}/results/outcome`).then(r => r.json()),
-          fetch(`${API}/matches/${matchId}/results/tracking`).then(r => r.json()),
-          fetch(`${API}/matches/${matchId}/results/tracking/frames`).then(r => r.json()),
-          fetch(`${API}/matches/${matchId}/names`).then(r => r.ok ? r.json() : { players: {}, teams: {} }),
-        ]);
-        setMeta(metaRes);
-        setFatigueData(fat);
-        setGoalProbData(goal);
-        setOutcomeData(out);
-        setTrackingData(track);
-        setAllTrackingData(allTrack);
-        setNames(savedNames);
-      } catch (e: unknown) {
-        setError(e instanceof Error ? e.message : "Could not load match data. Is the backend running?");
-      } finally {
-        setLoading(false);
-      }
+  const loadResults = useCallback(async () => {
+    try {
+      const [metaRes, fat, goal, out, track, allTrack, savedNames] = await Promise.all([
+        fetch(`${API}/matches/${matchId}`).then(r => {
+          if (!r.ok) throw new Error("Match not found");
+          return r.json();
+        }),
+        fetch(`${API}/matches/${matchId}/results/fatigue`).then(r => r.json()),
+        fetch(`${API}/matches/${matchId}/results/goal-prob`).then(r => r.json()),
+        fetch(`${API}/matches/${matchId}/results/outcome`).then(r => r.json()),
+        fetch(`${API}/matches/${matchId}/results/tracking`).then(r => r.json()),
+        fetch(`${API}/matches/${matchId}/results/tracking/frames`).then(r => r.json()),
+        fetch(`${API}/matches/${matchId}/names`).then(r => r.ok ? r.json() : { players: {}, teams: {} }),
+      ]);
+      setMeta(metaRes);
+      setFatigueData(fat);
+      setGoalProbData(goal);
+      setOutcomeData(out);
+      setTrackingData(track);
+      setAllTrackingData(allTrack);
+      setNames(savedNames);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Could not load match data. Is the backend running?");
+    } finally {
+      setLoading(false);
     }
-    load();
   }, [matchId]);
+
+  useEffect(() => { loadResults(); }, [loadResults]);
 
   if (loading) {
     return (
@@ -114,6 +115,11 @@ export default function MatchResultsClient({ matchId }: { matchId: string }) {
           trackingData={trackingData}
           onClose={() => setShowNaming(false)}
           onSaved={saved => { setNames(saved); setShowNaming(false); }}
+          onCorrectionsApplied={() => { setTeamOverrides({}); setRoleOverrides({}); loadResults(); }}
+          teamOverrides={teamOverrides}
+          roleOverrides={roleOverrides}
+          onTeamOverridesChange={setTeamOverrides}
+          onRoleOverridesChange={setRoleOverrides}
         />
       )}
 

@@ -319,7 +319,7 @@ def process_all_frames(PLAYER_DETECTION_MODEL, FIELD_DETECTION_MODEL, CONFIG, te
     frame_number = 0
 
     # Field detection cache — re-run every N frames instead of every frame
-    FIELD_REFRESH_INTERVAL = 10
+    FIELD_REFRESH_INTERVAL = 30
     cached_transformer: ViewTransformer | None = None
     _best_kp_span = 0.0   # x-span (metres) of the keypoints used for the current best transformer
 
@@ -350,7 +350,7 @@ def process_all_frames(PLAYER_DETECTION_MODEL, FIELD_DETECTION_MODEL, CONFIG, te
         if orig_h is None:
             orig_h, orig_w = frame.shape[:2]
             scale_x, scale_y = orig_w / INFER_SIZE, orig_h / INFER_SIZE
-        small_frame = cv2.resize(frame, (INFER_SIZE, INFER_SIZE), interpolation=cv2.INTER_LINEAR)
+        small_frame = cv2.resize(frame, (INFER_SIZE, INFER_SIZE), interpolation=cv2.INTER_NEAREST)
 
         # 1. Detect
         result = PLAYER_DETECTION_MODEL.infer(small_frame, confidence=CONFIDENCE)[0]
@@ -676,6 +676,7 @@ def player_tracking(player_model=None, field_model=None, on_frame=None, cancel_e
         field_model = get_model(model_id="football-field-detection-f07vi/14", api_key=ROBOFLOW_API_KEY)
 
     print(f"Using: {DEVICE}")
+
     STRIDE = 30
 
     crops = []
@@ -733,7 +734,7 @@ class RealTimeTracker:
         self.tracker = HybridSort(
             reid_weights=_REID_WEIGHTS,
             device=torch.device(DEVICE),
-            half=False,
+            half=True,
             cmc_method='sof',
             track_thresh=0.3,
             low_thresh=0.1,
@@ -771,7 +772,8 @@ class RealTimeTracker:
             color=sv.ColorPalette.from_hex(['#00BFFF', '#FF1493', '#FFD700']),
             text_color=sv.Color.from_hex('#000000'),
             text_position=sv.Position.BOTTOM_CENTER,
-            text_scale=1,
+            text_scale=0.4,
+            text_thickness=1,
         )
         self._triangle_ann = sv.TriangleAnnotator(
             color=sv.Color.from_hex('#FFD700'),

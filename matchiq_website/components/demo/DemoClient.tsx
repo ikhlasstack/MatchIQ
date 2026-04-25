@@ -344,9 +344,11 @@ export default function DemoClient() {
   const [currentFrame, setCurrentFrame] = useState(0);
   const [isStreaming,   setIsStreaming]   = useState(false);
   const [serverPhase,   setServerPhase]   = useState(0);
-  const [savedMatchId,  setSavedMatchId]  = useState<string | null>(null);
-  const [showNaming,    setShowNaming]    = useState(false);
-  const [names,         setNames]         = useState<NamesMap>({ players: {}, teams: {} });
+  const [savedMatchId,    setSavedMatchId]    = useState<string | null>(null);
+  const [showNaming,      setShowNaming]      = useState(false);
+  const [names,           setNames]           = useState<NamesMap>({ players: {}, teams: {} });
+  const [teamOverrides,   setTeamOverrides]   = useState<Record<number, number>>({});
+  const [roleOverrides,   setRoleOverrides]   = useState<Record<number, string>>({});
 
   const wsRef      = useRef<WebSocket | null>(null);
   const annotRef   = useRef<HTMLCanvasElement | null>(null);
@@ -377,6 +379,26 @@ export default function DemoClient() {
       setAllTrackingData(allTrack);
     } catch (_) {
       /* non-fatal — charts fall back to loading state */
+    }
+  }, []);
+
+  /* Re-fetch from the saved match after corrections are applied */
+  const fetchSavedResults = useCallback(async (matchId: string) => {
+    try {
+      const [fat, goal, out, track, allTrack] = await Promise.all([
+        fetch(`${API}/matches/${matchId}/results/fatigue`).then(r => r.json()),
+        fetch(`${API}/matches/${matchId}/results/goal-prob`).then(r => r.json()),
+        fetch(`${API}/matches/${matchId}/results/outcome`).then(r => r.json()),
+        fetch(`${API}/matches/${matchId}/results/tracking`).then(r => r.json()),
+        fetch(`${API}/matches/${matchId}/results/tracking/frames`).then(r => r.json()),
+      ]);
+      setFatigueData(fat);
+      setGoalProbData(goal);
+      setOutcomeData(out);
+      setTrackingData(track);
+      setAllTrackingData(allTrack);
+    } catch (_) {
+      /* non-fatal */
     }
   }, []);
 
@@ -539,6 +561,7 @@ export default function DemoClient() {
     setFatigueData(null); setGoalProbData(null); setOutcomeData(null);
     setTrackingData(null); setAllTrackingData(null); setLivePositions(null); setCurrentFrame(0);
     setSavedMatchId(null); setShowNaming(false); setNames({ players: {}, teams: {} });
+    setTeamOverrides({}); setRoleOverrides({});
   };
 
   return (
@@ -550,6 +573,11 @@ export default function DemoClient() {
           trackingData={trackingData}
           onClose={() => setShowNaming(false)}
           onSaved={saved => { setNames(saved); setShowNaming(false); }}
+          onCorrectionsApplied={() => { setTeamOverrides({}); setRoleOverrides({}); fetchSavedResults(savedMatchId); }}
+          teamOverrides={teamOverrides}
+          roleOverrides={roleOverrides}
+          onTeamOverridesChange={setTeamOverrides}
+          onRoleOverridesChange={setRoleOverrides}
         />
       )}
       {/* Page header */}

@@ -72,8 +72,8 @@ class MovementFeatureTracker:
         return movement_by_player, frame_summary
 
 
-def features():
-    df = pd.read_csv('Match_Data_CSV/1_tracking.csv')
+def features(csv_dir='Match_Data_CSV'):
+    df = pd.read_csv(f'{csv_dir}/1_tracking.csv')
 
     #filter players/keepers
     movement_df = df[df['role'].isin(['player', 'goalkeeper'])].copy()
@@ -125,6 +125,6 @@ def features():
     movement_df['is_sprint'] = (movement_df['speed'] > SPRINT_THRESHOLD).astype(int)
 
     #Save
-    movement_df.to_csv('Match_Data_CSV/1_Movement_Features.csv', index=False)
+    movement_df.to_csv(f'{csv_dir}/1_Movement_Features.csv', index=False)
 
     return 

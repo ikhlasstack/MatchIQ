@@ -20,20 +20,18 @@ async function parseMjpegStream(
   try {
     res = await fetch(url, { signal });
   } catch {
-    return;                 // aborted before connect
+    return;
   }
   if (!res.body) return;
 
   const reader = res.body.getReader();
 
-  /** Concatenate two typed arrays. */
   const concat = (a: Uint8Array, b: Uint8Array) => {
     const out = new Uint8Array(a.length + b.length);
     out.set(a); out.set(b, a.length);
     return out;
   };
 
-  /** Find the first occurrence of a byte sequence starting at `from`. */
   const findSeq = (buf: Uint8Array, seq: readonly number[], from = 0): number => {
     outer: for (let i = from; i <= buf.length - seq.length; i++) {
       for (let j = 0; j < seq.length; j++) {
@@ -54,19 +52,17 @@ async function parseMjpegStream(
       if (done) break;
       buffer = concat(buffer, value);
 
-      // Extract as many complete JPEGs as are present in the current buffer
       let soiIdx = findSeq(buffer, SOI);
       while (soiIdx !== -1) {
         const eoiIdx = findSeq(buffer, EOI, soiIdx + 2);
-        if (eoiIdx === -1) break;                   // frame not complete yet
-        onFrame(buffer.slice(soiIdx, eoiIdx + 2));  // emit the JPEG
+        if (eoiIdx === -1) break;
+        onFrame(buffer.slice(soiIdx, eoiIdx + 2));
         buffer  = buffer.slice(eoiIdx + 2);
         soiIdx  = findSeq(buffer, SOI);
       }
 
-      // Keep the tail (partial frame) but discard leading garbage
       if (soiIdx === -1 && buffer.length > 4096) {
-        buffer = new Uint8Array(0);               // discard stale bytes
+        buffer = new Uint8Array(0);
       }
     }
   } catch (err: unknown) {
@@ -133,7 +129,6 @@ function TrackedVideoPlayer({
     }
   };
 
-  /* Sync state from the video element */
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
@@ -174,7 +169,6 @@ function TrackedVideoPlayer({
         </div>
       )}
 
-      {/* Video element — hidden native controls */}
       <div ref={wrapRef} style={{ position: "relative", background: "#000", borderRadius: "0.75rem", overflow: "hidden" }}>
         <video
           ref={videoRef}
@@ -183,7 +177,6 @@ function TrackedVideoPlayer({
           onClick={toggle}
           style={{ width: "100%", display: "block", maxHeight: fullscr ? "100vh" : "400px", cursor: "pointer" }}
         />
-        {/* Big play overlay when paused */}
         {!playing && (
           <div
             onClick={toggle}
@@ -204,7 +197,6 @@ function TrackedVideoPlayer({
         )}
       </div>
 
-      {/* Seek bar */}
       <div style={{ display: "flex", flexDirection: "column", gap: "3px" }}>
         <input
           type="range"
@@ -221,10 +213,7 @@ function TrackedVideoPlayer({
         </div>
       </div>
 
-      {/* Controls row */}
       <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
-
-        {/* Play / Pause */}
         <button
           onClick={toggle}
           style={{
@@ -238,7 +227,6 @@ function TrackedVideoPlayer({
           {playing ? "⏸ Pause" : "▶ Play"}
         </button>
 
-        {/* Speed */}
         <select
           value={speed}
           onChange={e => changeSpeed(Number(e.target.value))}
@@ -256,7 +244,6 @@ function TrackedVideoPlayer({
           <option value={2}>2×</option>
         </select>
 
-        {/* Skip back 10 s */}
         <button
           onClick={() => seek(Math.max(0, current - 10))}
           title="−10 s"
@@ -267,7 +254,6 @@ function TrackedVideoPlayer({
           }}
         >⏪ 10s</button>
 
-        {/* Skip forward 10 s */}
         <button
           onClick={() => seek(Math.min(duration, current + 10))}
           title="+10 s"
@@ -278,7 +264,6 @@ function TrackedVideoPlayer({
           }}
         >10s ⏩</button>
 
-        {/* Fullscreen */}
         <button
           onClick={toggleFullscreen}
           style={{
@@ -311,23 +296,17 @@ export default function VideoTab({
   videoUrl?: string;
   onFrameChange?: (frame: number) => void;
 }) {
-  /* ── post-pipeline <video> ref ── */
   const videoRef = useRef<HTMLVideoElement>(null);
 
-  /* ── live frame buffer ── */
   const [frames,    setFrames]    = useState<Uint8Array<ArrayBuffer>[]>([]);
   const [frameIdx,  setFrameIdx]  = useState(0);
   const [isLive,    setIsLive]    = useState(true);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [playSpeed, setPlaySpeed] = useState(50);  // ms between frames
+  const [playSpeed, setPlaySpeed] = useState(50);
 
-  // Ref mirror of frames so callbacks don't go stale
   const framesRef = useRef<Uint8Array<ArrayBuffer>[]>([]);
-
-  /* ── canvas ref ── */
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
-  /* ── Draw the selected frame on the canvas ── */
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -336,7 +315,6 @@ export default function VideoTab({
 
     const frameData = frames[frameIdx];
     if (!frameData) {
-      // Waiting / empty state
       ctx.fillStyle = "#07090f";
       ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
       ctx.fillStyle    = "rgba(255,255,255,0.08)";
@@ -349,12 +327,10 @@ export default function VideoTab({
       return;
     }
 
-    // Decode JPEG → draw on canvas
     const blob = new Blob([frameData], { type: "image/jpeg" });
     const url  = URL.createObjectURL(blob);
     const img  = new window.Image();
     img.onload = () => {
-      // Guard: canvas may have unmounted by the time the image decodes
       if (!canvasRef.current) { URL.revokeObjectURL(url); return; }
       canvasRef.current.getContext("2d")?.drawImage(img, 0, 0, CANVAS_W, CANVAS_H);
       URL.revokeObjectURL(url);
@@ -362,7 +338,6 @@ export default function VideoTab({
     img.src = url;
   }, [frameIdx, frames]);
 
-  /* ── Live follow: when live, always display the newest frame ── */
   useEffect(() => {
     if (isLive && frames.length > 0) {
       const idx = frames.length - 1;
@@ -371,12 +346,10 @@ export default function VideoTab({
     }
   }, [isLive, frames.length, onFrameChange]);
 
-  /* ── Sequential playback (only when not live) ── */
   useEffect(() => {
     if (!isPlaying || isLive) return;
     const id = setInterval(() => {
       setFrameIdx(idx => {
-        // Stop at the last buffered frame; don't wrap
         if (idx >= framesRef.current.length - 1) return idx;
         return idx + 1;
       });
@@ -384,14 +357,12 @@ export default function VideoTab({
     return () => clearInterval(id);
   }, [isPlaying, isLive, playSpeed]);
 
-  /* ── MJPEG capture: start when streaming begins, abort on cleanup ── */
   useEffect(() => {
     if (!isStreaming) return;
 
     let mounted = true;
     const controller = new AbortController();
 
-    // Reset to a clean live session
     setFrames([]);
     setFrameIdx(0);
     setIsLive(true);
@@ -417,7 +388,6 @@ export default function VideoTab({
     };
   }, [isStreaming]);
 
-  /* ── Post-pipeline video: reload when pipeline finishes ── */
   useEffect(() => {
     if (done && videoRef.current) videoRef.current.load();
   }, [done]);
@@ -429,7 +399,6 @@ export default function VideoTab({
     }
   }, [phase, done, isStreaming]);
 
-  /* ── Jump to live (stable callback — reads framesRef, not stale state) ── */
   const goLive = useCallback(() => {
     setIsPlaying(false);
     setIsLive(true);
@@ -439,15 +408,12 @@ export default function VideoTab({
   const showVideo = (phase >= 2 || done) && !isStreaming;
 
   /* ════════════════════════════════════════════════════════════════════════════
-   * CASE 1 — Live stream with frame scrubbing
+   * CASE 1 — Live stream
    * ════════════════════════════════════════════════════════════════════════════ */
   if (isStreaming) {
     return (
       <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
-
-        {/* ── Canvas (annotated frame) ── */}
         <div style={{ position: "relative" }}>
-          {/* Status badge */}
           <div style={{
             position: "absolute", top: 10, left: 10, zIndex: 10,
             display: "flex", alignItems: "center", gap: "6px",
@@ -480,17 +446,13 @@ export default function VideoTab({
           />
         </div>
 
-        {/* ── Timeline ── */}
         <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
           <div style={{ display: "flex", justifyContent: "space-between" }}>
             <span style={{ fontSize: "0.7rem", color: "#555" }}>
               Frame&nbsp;<strong style={{ color: "#888" }}>{frameIdx + 1}</strong>
               &nbsp;/&nbsp;{frames.length}
             </span>
-            <span style={{
-              fontSize: "0.7rem", fontWeight: 700,
-              color: isLive ? "#ef4444" : "#D4AF37",
-            }}>
+            <span style={{ fontSize: "0.7rem", fontWeight: 700, color: isLive ? "#ef4444" : "#D4AF37" }}>
               {isLive ? "● LIVE" : "◈ Scrubbing"}
             </span>
           </div>
@@ -510,32 +472,29 @@ export default function VideoTab({
           />
         </div>
 
-        {/* ── Controls ── */}
         <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
-          {/* Play / Pause */}
           <button
             onClick={() => { setIsLive(false); setIsPlaying(p => !p); }}
             style={{
               padding: "0.38rem 0.85rem", borderRadius: "0.5rem",
               fontSize: "0.82rem", fontWeight: 700, cursor: "pointer",
               background: (isPlaying && !isLive) ? "rgba(212,175,55,0.12)" : "transparent",
-              border:     (isPlaying && !isLive) ? "1px solid #D4AF37"         : "1px solid #2a2a2a",
-              color:      (isPlaying && !isLive) ? "#D4AF37"                   : "#888",
+              border:     (isPlaying && !isLive) ? "1px solid #D4AF37"     : "1px solid #2a2a2a",
+              color:      (isPlaying && !isLive) ? "#D4AF37"               : "#888",
             }}
           >
             {isPlaying && !isLive ? "⏸ Pause" : "▶ Play"}
           </button>
 
-          {/* Live */}
           <button
             onClick={goLive}
             style={{
               padding: "0.38rem 0.85rem", borderRadius: "0.5rem",
               fontSize: "0.82rem", fontWeight: 700, cursor: "pointer",
               display: "flex", alignItems: "center", gap: "5px",
-              background: isLive ? "rgba(239,68,68,0.1)"    : "transparent",
+              background: isLive ? "rgba(239,68,68,0.1)"         : "transparent",
               border:     isLive ? "1px solid rgba(239,68,68,0.5)" : "1px solid #2a2a2a",
-              color:      isLive ? "#ef4444"                  : "#888",
+              color:      isLive ? "#ef4444"                      : "#888",
             }}
           >
             {isLive && (
@@ -548,7 +507,6 @@ export default function VideoTab({
             ⏺ Live
           </button>
 
-          {/* Speed */}
           <select
             value={playSpeed}
             onChange={e => setPlaySpeed(Number(e.target.value))}
@@ -579,14 +537,14 @@ export default function VideoTab({
   }
 
   /* ════════════════════════════════════════════════════════════════════════════
-   * CASE 2 — Post-pipeline: custom video player (play/pause, seek, speed)
+   * CASE 2 — Post-pipeline video player
    * ════════════════════════════════════════════════════════════════════════════ */
   if (showVideo) {
     return <TrackedVideoPlayer done={done} videoRef={videoRef} videoUrl={videoUrl} onFrameChange={onFrameChange} />;
   }
 
   /* ════════════════════════════════════════════════════════════════════════════
-   * CASE 3 — Idle: pitch placeholder
+   * CASE 3 — Idle placeholder
    * ════════════════════════════════════════════════════════════════════════════ */
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>

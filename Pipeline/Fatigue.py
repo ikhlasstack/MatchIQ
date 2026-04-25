@@ -99,8 +99,8 @@ def fatigue_label(score):
     else:
         return 'LOW'
 
-def fatigue():
-    df = pd.read_csv('Match_Data_CSV/1_Movement_Features.csv')
+def fatigue(csv_dir='Match_Data_CSV'):
+    df = pd.read_csv(f'{csv_dir}/1_Movement_Features.csv')
 
     #Split in 1st and 2nd half
     total_frames = df['frame'].max()
@@ -138,6 +138,6 @@ def fatigue():
     fatigue_df['fatigue_level'] = fatigue_df['fatigue_score'].apply(fatigue_label)
 
     #Save to csv
-    fatigue_df.to_csv('Match_Data_CSV/1_fatigue_scores.csv', index=True)
+    fatigue_df.to_csv(f'{csv_dir}/1_fatigue_scores.csv', index=True)
 
     return 
