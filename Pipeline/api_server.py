@@ -8,8 +8,13 @@ Start from the Pipeline/ folder:
 Then open: http://localhost:3000/demo
 """
 
+import math
 import os
 import sys
+
+# Use locally cached HuggingFace models without hitting the network.
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+os.environ.setdefault("HF_DATASETS_OFFLINE", "1")
 
 # The system libcudart.so.12 is v12.0 but cuDNN 9.x needs 12.1+. We must
 # preload the venv's libcudart.so.12 (12.1) FIRST so cuDNN links against it
@@ -82,19 +87,31 @@ _stream_thread: threading.Thread | None = None
 def _load_models():
     global _player_model, _field_model, _models_ready
     from inference import get_model  # noqa: PLC0415
+    import numpy as _np
+    import threading as _threading
+
     api_key = os.getenv("ROBOFLOW_API_KEY")
-    print("[MatchIQ] Loading player detection model...")
-    _player_model = get_model(model_id="football-vgiqa-3njno/2", api_key=api_key)
-    print("[MatchIQ] Loading field detection model...")
-    _field_model  = get_model(model_id="football-field-detection-f07vi/14", api_key=api_key)
-    print("[MatchIQ] Warming up models (first-inference JIT)...")
-    try:
-        import numpy as _np
-        _dummy = _np.zeros((64, 64, 3), dtype=_np.uint8)
+    _dummy = _np.zeros((640, 640, 3), dtype=_np.uint8)
+
+    def _load_player():
+        global _player_model
+        print("[MatchIQ] Loading player detection model...")
+        _player_model = get_model(model_id="football-vgiqa-3njno/2", api_key=api_key)
         _player_model.infer(_dummy, confidence=0.3)
+        print("[MatchIQ] Player model ready.")
+
+    def _load_field():
+        global _field_model
+        print("[MatchIQ] Loading field detection model...")
+        _field_model = get_model(model_id="football-field-detection-f07vi/14", api_key=api_key)
         _field_model.infer(_dummy, confidence=0.3)
-    except Exception as _e:
-        print(f"[MatchIQ] Warmup warning (non-fatal): {_e}")
+        print("[MatchIQ] Field model ready.")
+
+    t1 = _threading.Thread(target=_load_player, daemon=True)
+    t2 = _threading.Thread(target=_load_field,  daemon=True)
+    t1.start(); t2.start()
+    t1.join();  t2.join()
+
     _models_ready = True
     print("[MatchIQ] Models ready.")
 
@@ -226,11 +243,12 @@ def _ws_broadcast(message: dict):
     text = json.dumps(message)
     with _ws_lock:
         clients = list(_ws_clients)
+    print(f"[WS] broadcast type={message.get('type')} to {len(clients)} client(s)", flush=True)
     for ws, loop in clients:
         try:
             _asyncio.run_coroutine_threadsafe(ws.send_text(text), loop)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[WS] send error: {e}", flush=True)
 
 
 class _StreamingVideoWriter:
@@ -245,7 +263,7 @@ class _StreamingVideoWriter:
         with _mjpeg_count_lock:
             has_clients = _mjpeg_client_count > 0
         if has_clients:   # skip JPEG encode when no client is watching
-            ok, jpg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 60])
+            ok, jpg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 92])
             if ok:
                 try:
                     _frame_queue.put_nowait(jpg.tobytes())
@@ -260,6 +278,27 @@ class _StreamingVideoWriter:
 
     def __getattr__(self, name):
         return getattr(self._w, name)
+
+
+_player_pos_history: dict[int, tuple[float, float]] = {}
+
+
+def _enrich_with_velocity(rows: list, pos_history: dict, pitch_w=105.0, pitch_h=68.0, fps=30) -> list:
+    """Add vx, vy, speed (m/s) to each row using the previous frame's position."""
+    enriched = []
+    for row in rows:
+        pid = row.get("id")
+        x, y = row.get("x", 0), row.get("y", 0)
+        if pid is not None and pid != -1 and pid in pos_history:
+            px, py = pos_history[pid]
+            dvx = (x - px) / 100.0 * pitch_w
+            dvy = (y - py) / 100.0 * pitch_h
+            spd = round(math.sqrt(dvx * dvx + dvy * dvy) * fps, 2)
+            row = {**row, "vx": round(dvx, 3), "vy": round(dvy, 3), "speed": spd}
+        if pid is not None and pid != -1:
+            pos_history[pid] = (x, y)
+        enriched.append(row)
+    return enriched
 
 
 def _run_tracking_with_stream():
@@ -278,9 +317,11 @@ def _run_tracking_with_stream():
 
     global _latest_positions
     _latest_positions = []
+    _player_pos_history.clear()
 
     def _on_frame(rows):
         global _latest_positions
+        rows = _enrich_with_velocity(rows, _player_pos_history)
         _latest_positions = rows
         _ws_broadcast({"type": "positions", "rows": rows})
 
@@ -447,7 +488,7 @@ def _resolve_stream_url(url: str) -> str:
     # 1. Try streamlink — best for live streams (YouTube Live, Twitch, etc.)
     try:
         result = subprocess.run(
-            [_STREAMLINK, "--stream-url", url, "best"],
+            [_STREAMLINK, "--stream-url", url, "1080p60,1080p,best"],
             capture_output=True, text=True, timeout=20,
         )
         direct = result.stdout.strip()
@@ -459,9 +500,11 @@ def _resolve_stream_url(url: str) -> str:
         print(f"[streamlink] {e}")
 
     # 2. Fall back to yt-dlp — better for VODs
+    # Request best video-only stream (no audio needed); avoids YouTube's 720p cap on
+    # pre-merged formats. bestvideo prefers 1080p/60fps if available.
     try:
         result = subprocess.run(
-            [_YTDLP, "-g", "--no-playlist", "-f", "best[ext=mp4]/best", url],
+            [_YTDLP, "-g", "--no-playlist", "-f", "bestvideo[ext=mp4]/bestvideo/best", url],
             capture_output=True, text=True, timeout=30,
         )
         direct = result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
@@ -523,7 +566,7 @@ def _stream_capture_thread(direct_url: str, ws: "WebSocket", loop: "_asyncio.Abs
             if jpeg_bytes:
                 _send({"type": "rt_frame", "image": base64.b64encode(jpeg_bytes).decode()})
             if live_rows:
-                _send({"type": "positions", "rows": live_rows})
+                _send({"type": "positions", "rows": _enrich_with_velocity(live_rows, _player_pos_history)})
 
     finally:
         cap.release()
@@ -623,6 +666,11 @@ async def websocket_endpoint(ws: WebSocket):
                     name="stream-capture",
                 )
                 _stream_thread.start()
+
+            elif msg.get("type") == "set_overlays":
+                with _rt_lock:
+                    if _rt_tracker is not None:
+                        _rt_tracker.set_overlays(msg.get("overlays", {}))
 
             elif msg.get("type") == "yt_stop":
                 _stream_stop.set()
@@ -931,13 +979,23 @@ def results_tracking_frames():
                 raw_y = row.get("y", vid_h / 2)
                 px = round(float(raw_x) / vid_w * 100, 2) if pd.notna(raw_x) else 50.0
                 py = round(float(raw_y) / vid_h * 100, 2) if pd.notna(raw_y) else 50.0
-            records.append({
+            rec: dict = {
                 "id":   int(row["player_id"]),
                 "team": int(row["team_id"]) if pd.notna(row.get("team_id")) else -1,
                 "role": str(row["role"]),
                 "x":    px,
                 "y":    py,
-            })
+            }
+            # Overlay fields — present in new CSVs, absent in old ones
+            if pd.notna(row.get("bbox_x1")):
+                rec["px"]   = round(float(row["x"]), 1)
+                rec["py"]   = round(float(row["y"]), 1)
+                rec["bbox"] = [round(float(row["bbox_x1"]), 1), round(float(row["bbox_y1"]), 1),
+                               round(float(row["bbox_x2"]), 1), round(float(row["bbox_y2"]), 1)]
+                rec["vx"]    = round(float(row.get("vx", 0) or 0), 4)
+                rec["vy"]    = round(float(row.get("vy", 0) or 0), 4)
+                rec["speed"] = round(float(row.get("speed", 0) or 0), 2)
+            records.append(rec)
         out[str(f)] = records
 
     return {"fps": 25, "total_frames": int(all_frames[-1]) + 1 if all_frames else 0, "frames": out}
@@ -1110,6 +1168,9 @@ def saved_tracking_frames(match_id: str):
     step = max(1, total // 1500)
     sampled = all_frames[::step]
 
+    vid_w = float(df["x"].max()) if df["x"].notna().any() else 1920.0
+    vid_h = float(df["y"].max()) if df["y"].notna().any() else 1080.0
+
     out: dict = {}
     for f in sampled:
         rows = df[df["frame"] == f]
@@ -1117,17 +1178,26 @@ def saved_tracking_frames(match_id: str):
         for _, row in rows.iterrows():
             px, py = _norm_pct(row.get("pitch_x"), row.get("pitch_y"))
             if px is None:
-                raw_x = row.get("x", 960)
-                raw_y = row.get("y", 540)
-                px = round(float(raw_x) / 1920 * 100, 2) if pd.notna(raw_x) else 50.0
-                py = round(float(raw_y) / 1080 * 100, 2) if pd.notna(raw_y) else 50.0
-            records.append({
+                raw_x = row.get("x", vid_w / 2)
+                raw_y = row.get("y", vid_h / 2)
+                px = round(float(raw_x) / vid_w * 100, 2) if pd.notna(raw_x) else 50.0
+                py = round(float(raw_y) / vid_h * 100, 2) if pd.notna(raw_y) else 50.0
+            rec: dict = {
                 "id":   int(row["player_id"]),
                 "team": int(row["team_id"]) if pd.notna(row.get("team_id")) else -1,
                 "role": str(row["role"]),
                 "x":    px,
                 "y":    py,
-            })
+            }
+            if pd.notna(row.get("bbox_x1")):
+                rec["px"]    = round(float(row["x"]), 1)
+                rec["py"]    = round(float(row["y"]), 1)
+                rec["bbox"]  = [round(float(row["bbox_x1"]), 1), round(float(row["bbox_y1"]), 1),
+                                round(float(row["bbox_x2"]), 1), round(float(row["bbox_y2"]), 1)]
+                rec["vx"]    = round(float(row.get("vx", 0) or 0), 4)
+                rec["vy"]    = round(float(row.get("vy", 0) or 0), 4)
+                rec["speed"] = round(float(row.get("speed", 0) or 0), 2)
+            records.append(rec)
         out[str(f)] = records
 
     return {"fps": 25, "total_frames": int(all_frames[-1]) + 1 if all_frames else 0, "frames": out}

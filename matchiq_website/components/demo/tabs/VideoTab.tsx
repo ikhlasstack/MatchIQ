@@ -175,7 +175,7 @@ function TrackedVideoPlayer({
           src={videoUrl ?? `${API}/video/tracked`}
           playsInline
           onClick={toggle}
-          style={{ width: "100%", display: "block", maxHeight: fullscr ? "100vh" : "400px", cursor: "pointer" }}
+          style={{ width: "100%", display: "block", maxHeight: fullscr ? "100vh" : "72vh", cursor: "pointer" }}
         />
         {!playing && (
           <div

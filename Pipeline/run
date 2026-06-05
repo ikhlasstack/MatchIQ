@@ -1,3 +1,13 @@
 #!/usr/bin/env bash
 
 sudo bash -c "cd /mnt/d/MatchIQ/Pipeline && /mnt/d/MatchIQ/venv/bin/uvicorn api_server:app --reload --port 8000"
+
+
+# Yes — TeamClassifier from sports uses SigLIP (a vision transformer from Google) to extract image embeddings from player crops, then runs KMeans on those embeddings to cluster into 2 teams. It's accurate but extremely slow to load.
+
+# The question is: do you want to keep the accuracy of the vision transformer but fix the load time, or switch to a faster simpler approach?
+# Options:
+
+# Keep SigLIP but load it at server startup (background thread, same as the detection models) — TeamClassifier init moves out of the pipeline trigger, so the 115s happens once at boot, not when you start processing
+# Replace with HSV colour histogram + KMeans — initialises in milliseconds, slightly less robust for teams with similar-coloured kits but fast and dependency-free
+# Replace with a smaller embedding model (e.g. MobileNet crops) — middle ground

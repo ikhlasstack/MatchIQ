@@ -34,4 +34,4 @@ websocket-client==1.9.0
 inference==1.2.1
 onnxruntime==1.21.1
 
-#uvicorn api_server:app --reload --port 8000
+uvicorn api_server:app --reload --port 8000

@@ -12,10 +12,12 @@ and match outcome predictions, then serves all results through a FastAPI backend
 Next.js web dashboard.
 
 The system operates in two modes:
-- **Batch** (main.py): processes the entire video offline, writes CSVs.
-- **Live/API** (api_server.py): accepts video upload, runs pipeline in a background thread,
-  streams annotated frames via MJPEG to the frontend, pushes real-time status and live
-  player positions over WebSocket (/ws), and exposes REST endpoints for results.
+- **Batch/Upload** (main.py / api_server.py upload flow): processes an entire video offline,
+  writes CSVs, archives the match.
+- **Live/Real-Time** (api_server.py realtime flow): accepts a YouTube/Twitch/streamlink URL,
+  resolves the direct stream URL (via streamlink → yt-dlp fallback), captures frames via
+  cv2.VideoCapture, processes them through RealTimeTracker, and pushes annotated JPEG frames
+  + live positions over the WebSocket to the frontend.
 
 
 ## PROBLEM STATEMENT
@@ -29,7 +31,7 @@ analysis from a single video file, requiring no specialised hardware beyond a co
 ## SYSTEM ARCHITECTURE
 
 ```
-Raw Video (MP4)
+Raw Video (MP4) or YouTube/Twitch URL
       │
       ▼
 ┌─────────────────────────────────────────────────────────────┐
@@ -37,10 +39,16 @@ Raw Video (MP4)
 │                                                              │
 │  POST /upload  →  saves to Test_Data/Testing.mp4            │
 │  POST /run     →  launches _run_pipeline() thread           │
+│                   (returns 503 if models not ready yet)     │
 │  POST /cancel  →  signals _cancel_event (graceful stop)     │
-│  GET  /status  →  phase, done, error, streaming, cancelled  │
-│  WS   /ws      →  push status + live positions (real-time)  │
-│  GET  /stream/frames  →  MJPEG live preview                 │
+│  GET  /status  →  phase, done, error, streaming,            │
+│                   cancelled, models_ready                   │
+│  WS   /ws      →  bidirectional:                            │
+│                   • server pushes status + live positions   │
+│                   • client sends {type:"frame"} for RT mode │
+│                   • client sends {type:"yt_start", url:...} │
+│                   • client sends {type:"yt_stop"}           │
+│  GET  /stream/frames  →  MJPEG live preview (upload mode)   │
 │  GET  /stream/positions  →  latest frame's player rows JSON │
 │  GET  /results/fatigue|goal-prob|outcome|tracking           │
 │  GET  /results/tracking/frames  →  all frames sampled       │
@@ -53,6 +61,13 @@ Raw Video (MP4)
 │  GET  /matches/{id}/names    →  player/team name mappings   │
 │  PUT  /matches/{id}/names    →  save player/team names      │
 │  GET  /matches/{id}/video    →  saved annotated MP4         │
+│  POST /realtime/reset        →  reset RealTimeTracker state │
+│  POST /matches/{id}/corrections → rewrite tracking CSV      │
+│                   (id_merges, team_overrides, role_overrides)│
+│                   then re-run phases 2–4 against saved dir  │
+│  POST /matches/{id}/rerender → re-annotate source_video.mp4 │
+│                   using corrected 1_tracking.csv; streams   │
+│                   Server-Sent Events {pct:0-100}/{done:true}│
 │                                                              │
 │  Pipeline stages (sequential, same thread):                  │
 │   Phase 1 → Player_Track.py   (player_tracking())           │
@@ -80,6 +95,7 @@ Raw Video (MP4)
       │      ├── 1_goal_predictions.csv
       │      ├── 1_match_predictions.csv
       │      ├── tracked_output.mp4
+      │      ├── source_video.mp4   ← copy of raw input (NEW: for rerender)
       │      ├── meta.json  (id, name, date, duration, frames, players)
       │      └── names.json (player_id→name, team_id→name mappings)
       │
@@ -87,7 +103,11 @@ Raw Video (MP4)
 ┌──────────────────────────────────────────────────────────────┐
 │           Next.js Frontend  (matchiq_website/)               │
 │                                                              │
-│  /demo page — upload, run, live stream, results tabs         │
+│  /demo page — upload OR real-time stream mode toggle         │
+│    Upload mode: drag-drop video, run, MJPEG live stream,     │
+│                 results tabs, save match                     │
+│    Real-time mode: paste YouTube/Twitch URL, yt_start WS    │
+│                    msg → server resolves & streams frames    │
 │    tabs: Video | Fatigue | Goal Prob | Outcome               │
 │    PitchRadar — live minimap during tracking (WebSocket)     │
 │    PitchRadar — scrub through all frames post-pipeline       │
@@ -107,33 +127,45 @@ Raw Video (MP4)
 - `football-field-detection-f07vi/14` (Roboflow YOLOv8) — detects 32 pitch keypoints
 
 **Models are pre-loaded at startup** (not re-loaded per run):
-`api_server.py` calls `_load_models()` once on `startup` via the FastAPI lifecycle event,
-storing `_player_model` and `_field_model` as module globals. These are passed directly to
-`player_tracking(player_model=..., field_model=...)` each run to avoid re-download overhead.
+`api_server.py` starts `_load_models()` in a daemon thread via the FastAPI lifespan
+`asynccontextmanager` (replaced the deprecated `@app.on_event("startup")`). Models are
+stored as `_player_model` and `_field_model` module globals and a `_models_ready` flag is
+set to `True` after loading + a warmup inference (first-inference JIT). `POST /run`
+returns HTTP 503 if `_models_ready` is False. The `/status` response now includes
+`"models_ready": bool`.
 
-**Tracker — BoxMot HybridSort (using bytetrack within) (switched from ByteTrack):**
-The tracker was changed from `supervision.ByteTrack` to `tr.OCSORTTracker` from the
-`trackers` package (imported as `import trackers as tr`). Both `process_all_frames()`
-(batch path) and `RealTimePlayerTracker` (real-time path) now instantiate OCSORTTracker
-with these parameters:
-- `lost_track_buffer=100–150` (depends on path), `frame_rate=25.0`
-- `minimum_consecutive_frames=1`, `minimum_iou_threshold=0.3`
-- `direction_consistency_weight=0.2`, `high_conf_det_threshold=0.6`, `delta_t=3`
-OC-SORT uses motion state (constant-velocity Kalman) and re-identification, providing
-more stable IDs across occlusions than ByteTrack.
+**Tracker — BoxMot HybridSort (switched from OC-SORT):**
+The tracker was changed from `trackers.OCSORTTracker` to
+`boxmot.trackers.hybridsort.hybridsort.HybridSort`. Both `process_all_frames()` (batch)
+and `RealTimeTracker` (real-time) now use HybridSort with:
+- `reid_weights=Path(".model_cache/osnet_x0_25_msmt17.pt")` — OSNet Re-ID weights
+- `cmc_method='sof'` — sparse optical flow camera-motion compensation (cheap for static cameras)
+- `track_thresh=0.3`, `low_thresh=0.1`, `max_age=5000` (batch) / `5000` (RT)
+- `min_hits=3` (batch) / `1` (RT), `iou_threshold=0.3`, `delta_t=3`
+- `use_byte=True`, `with_reid=True`, `with_longterm_reid=True`
+- RealTimeTracker uses `half=True` (FP16) for faster GPU inference
+- RealTimeTracker label annotator uses `text_scale=0.4, text_thickness=1` (smaller text)
 
-**Process per frame (process_all_frames):**
-1. Run player detection model (confidence threshold 0.3).
-2. Separate ball detections; pad bounding boxes by 10 px.
-3. Run NMS on player detections (threshold 0.5, class_agnostic=False).
-4. Track with `tr.OCSORTTracker` (see parameters above).
-5. Split detections by class: players, goalkeepers, referees.
+**BoxMot bridge helpers in Player_Track.py:**
+- `_sv_to_boxmot(sv.Detections) → np.ndarray` — converts supervision Detections to
+  BoxMot's [x1,y1,x2,y2,conf,cls] float32 array.
+- `_boxmot_to_sv(np.ndarray) → sv.Detections` — converts BoxMot track output
+  [x1,y1,x2,y2,track_id,conf,cls,...] back to sv.Detections with tracker_id set.
+
+**Process per frame (process_all_frames — batch path):**
+1. Resize frame to 640×640 with `cv2.INTER_NEAREST` (was INTER_LINEAR, changed for speed).
+2. Run player detection model (confidence threshold 0.3).
+3. Separate ball detections; pad bounding boxes by 10 px.
+4. Run NMS on player detections (threshold 0.5, class_agnostic=False).
+5. Track with HybridSort via `_sv_to_boxmot` → `tracker.update(dets, frame)` → `_boxmot_to_sv`.
+5. Split by class: players, goalkeepers, referees.
 6. Classify player teams using `sports.common.team.TeamClassifier`
    (SiglipEncoder crops → KMeans, bootstrapped over first 100+ frames at stride=30).
 7. Assign goalkeeper team by nearest-player proximity (centroid distance).
 8. Referees assigned class_id = -1.
 9. Run field detection model → estimate homography →
    `sports.common.view.ViewTransformer` maps pixel coords to pitch coords (0–105 m × 0–68 m).
+   Field homography cached; refreshed every **30 frames** (was 10, increased for speed).
 10. Annotate frame: ellipse per player (team colour: blue/pink/gold), triangle on ball, #ID labels.
 11. Write annotated frame to `tracked_output_raw.mp4` via `cv2.VideoWriter` (mp4v codec).
 12. Record per-frame CSV row + fire `on_frame(live_rows)` callback for WebSocket minimap.
@@ -144,35 +176,66 @@ brief team-id flips caused by track-swap occlusions, before the CSV is written.
 
 **After all frames:**
 - `out.release()` finalises the mp4v file.
-- PyAV re-encodes (not just remuxes) `tracked_output_raw.mp4` → `tracked_output.mp4`
-  as H.264 (`crf=23, preset=fast`) with `movflags=faststart` (moov atom at front) so
-  browsers can seek without buffering.
+- PyAV re-encodes `tracked_output_raw.mp4` → `tracked_output.mp4` as H.264
+  (`crf=23, preset=fast`) with `movflags=faststart` (moov atom at front) for browser seek.
 - Deletes the raw temp file.
 - Writes `Match_Data_CSV/1_tracking.csv`.
 
 **MJPEG streaming (api_server.py patch):**
 `api_server.py` patches `cv2.VideoWriter` with `_StreamingVideoWriter` at runtime.
-Every frame written is also JPEG-encoded (quality 60) and pushed to `_frame_queue`
-(maxsize=60, drops on full). The `/stream/frames` endpoint reads from this queue
-and emits `multipart/x-mixed-replace` MJPEG. The patch is active only during Phase 1;
-a `None` sentinel signals end-of-stream.
+A `_mjpeg_client_count` counter (protected by `_mjpeg_count_lock`) tracks active `/stream/frames`
+consumers. JPEG encoding (quality 60) only occurs when `_mjpeg_client_count > 0`, saving
+CPU when nobody is watching. The `/stream/frames` handler increments the counter on entry
+and decrements in a `finally` block. Queue maxsize = 60; frames silently dropped on full.
 
-**WebSocket live positions (switched from polling):**
-`_run_tracking_with_stream()` passes an `on_frame` callback to `player_tracking()`.
-After each frame, the callback builds normalised (pitch-%) position rows and calls
-`_ws_broadcast({"type": "positions", "rows": rows})`, which pushes to all connected
-WebSocket clients via `asyncio.run_coroutine_threadsafe`. The `/ws` endpoint also
-broadcasts all `_STATUS` changes the same way. The frontend no longer polls `/stream/positions`;
-it listens on the WebSocket instead (more efficient).
+**WebSocket live positions (bidirectional):**
+The `/ws` endpoint is now fully bidirectional. The server pushes `{type:"status"}` and
+`{type:"positions"}` as before. The client can now also send:
+- `{type:"frame", image:"<base64 JPEG>"}` — server decodes, runs `_process_rt_frame()` in
+  thread-pool executor, returns `{type:"rt_frame", image:...}` + `{type:"positions", rows:[...]}`.
+- `{type:"yt_start", url:"<stream URL>"}` — server resolves the URL using `_resolve_stream_url()`
+  (streamlink first, yt-dlp fallback), then starts `_stream_capture_thread` as a daemon thread.
+- `{type:"yt_stop"}` — sets `_stream_stop` event; thread exits cleanly.
+On WS disconnect, `_stream_stop` is also set to kill any active capture thread.
+
+**RealTimeTracker class (Player_Track.py):**
+Active, non-commented class for processing single frames in real-time mode.
+- Receives pre-loaded `player_model` and `field_model` from api_server.
+- Uses HybridSort with `max_age=5000`, `min_hits=1` (more lenient for live streams).
+- Inference resizes frames to 640×640, then scales detections back to original resolution.
+- Field homography refreshed every `FIELD_REFRESH_INTERVAL=10` frames; cached otherwise.
+- Team classification refreshed every `TEAM_CLASSIFY_INTERVAL=5` frames; fitted after
+  accumulating `MIN_CROPS_BEFORE_FIT=80` crops.
+- Goalkeeper re-linking: GK pitch-side memory + `GK_MAX_GAP=1000` frame absence tracking (increased from 90 to prevent re-linking failures in longer clips).
+- Returns `(annotated_jpeg: bytes, live_rows: list[dict])` per frame.
+- Note: The old `RealTimePlayerTracker` class (OC-SORT based) is now fully commented out.
 
 **Output:** `Match_Data_CSV/1_tracking.csv`
 Columns: frame, player_id, team_id, role, x, y, pitch_x, pitch_y, confidence
 
 ---
 
+**`rerender_video()` function (Player_Track.py):**
+A post-pipeline utility that re-annotates the original source video using corrected
+`1_tracking.csv` data without re-running detection or tracking. Used after
+`/matches/{id}/corrections` modifies player IDs/teams/roles.
+- Reads `source_video.mp4` (the raw input saved to each match folder since commit 2c50821).
+- Reconstructs bounding boxes from (x, y) columns in the CSV (stored as centre points).
+- Draws ellipses (team colour) + labels for players/goalkeepers, triangle for ball.
+- Writes `tracked_output_raw.mp4` (mp4v), then PyAV re-encodes to H.264 faststart.
+- `on_progress(pct)` callback called every 30 frames (0–100%).
+- Called from `/matches/{id}/rerender` via a background thread.
+
+---
+
 ### Phase 2 — Movement Features  (Movement_Features.py)
 
 **Input:** `1_tracking.csv`
+
+**`csv_dir` parameter:** `features(csv_dir='Match_Data_CSV')` — all four pipeline entry-point
+functions now accept a `csv_dir` argument so they can operate on a saved match directory
+instead of always reading/writing `Match_Data_CSV/`. This enables the `/corrections` endpoint
+to re-run phases 2–4 in-place against a saved match folder.
 
 Per player per frame:
 - **Distance**: Euclidean distance from previous position (pixels).
@@ -253,11 +316,47 @@ The module contains two components:
 After Phase 4 completes (or on mid-pipeline cancel), `_save_match(original_name)` is called:
 - Creates `Saved_Matches/match_YYYYMMDD_HHMMSS/` directory.
 - Copies all five CSVs (that exist) and `tracked_output.mp4` into it.
+- **Copies `Test_Data/Testing.mp4` → `source_video.mp4`** (raw input, needed for rerender).
 - Derives stats from tracking CSV: total frames, unique player count (excluding referee/ball),
   duration string.
 - Writes `meta.json` with fields: id, name, date, saved_at, duration, frames, players.
 - Writes an empty `names.json` (`{"players": {}, "teams": {}}`) so the frontend can
   immediately PUT player/team name mappings.
+
+### Post-Match Correction Flow  (PlayerNamingModal → /corrections → /rerender)
+
+After a match is saved, users can correct tracking errors in `PlayerNamingModal`:
+
+**Three correction types (sent to `POST /matches/{id}/corrections`):**
+1. `id_merges: [{from: int, to: int}]` — merge a secondary track ID into a primary one.
+   The secondary ID's rows are rewritten to the primary ID; team_id is set to the
+   primary player's modal team.
+2. `team_overrides: {pid_str: team_int}` — force a specific player to a team.
+3. `role_overrides: {pid_str: role_str}` — force a player's role to "goalkeeper",
+   "player", or "referee".
+
+**Server-side (`/corrections`):**
+- Applies all three mutation types to `1_tracking.csv` in the saved match folder.
+- Re-runs `features()`, `fatigue()`, `goal_prob()`, `Match_Outcome()` with
+  `csv_dir=<match_dir>` so all downstream CSVs are recalculated consistently.
+
+**Video rerender (`POST /matches/{id}/rerender`):**
+- Triggered automatically by `PlayerNamingModal` after `/corrections` succeeds.
+- Reads `source_video.mp4` and the corrected `1_tracking.csv`.
+- Calls `rerender_video()` from `Player_Track.py` in a daemon thread.
+- Streams **Server-Sent Events** (`text/event-stream`):
+  `{"pct": 0–100}` as each frame is written, then `{"done": true}`.
+- Frontend shows a progress bar during rerender; Close button is disabled until done.
+- Overwrites `tracked_output.mp4` in the match folder when complete.
+
+**Frontend (PlayerNamingModal):**
+- Lifted `teamOverrides` / `roleOverrides` state to parent so `VideoTab` can preview
+  corrections live before applying.
+- New state: `rerendering`, `renderPct`, `renderError`.
+- While rerendering: progress bar shown, "Skip"/"Apply" buttons disabled, backdrop
+  click blocked (`onClick` guard checks `!rerendering`).
+- `onCorrectionsApplied` callback fires after rerender completes, triggering a full
+  results reload in the parent (`MatchResultsClient` / `DemoClient`).
 
 Saved matches are served via `/matches` and `/matches/{id}/*` endpoints, enabling the
 **Compare page** to load and compare any two previously processed matches.
@@ -279,15 +378,16 @@ Saved matches are served via `/matches` and `/matches/{id}/*` endpoints, enablin
 | Layer | Technology |
 |---|---|
 | Player detection | Roboflow `inference==1.2.1` (CPU) / `inference-gpu==1.2.1` (GPU), YOLOv8 models |
-| Object tracking | `trackers` package — `OCSORTTracker` (replaced supervision ByteTrack) |
+| Object tracking | `boxmot` — `HybridSort` with OSNet Re-ID (replaced OCSORTTracker from `trackers` package) |
 | Team classification | `sports` (Roboflow git) — SiglipEncoder + KMeans |
 | Pitch homography | `sports` ViewTransformer + SoccerPitchConfiguration |
 | Deep learning | `torch==2.5.1+cu121`, `torchvision==0.20.1+cu121` |
 | Video I/O | `opencv-contrib-python==4.10.0.84`, `av==14.2.0` (PyAV) |
+| Stream resolution | `streamlink` (live-first) + `yt-dlp` (VOD fallback), both called via subprocess |
 | Data processing | `pandas==2.3.3`, `numpy==1.26.4`, `scipy==1.17.1` |
 | Backend API | `fastapi==0.115.14`, `uvicorn==0.44.0` |
-| Real-time comms | WebSocket (`/ws`) — replaces polling for status + live minimap positions |
-| Frontend | Next.js (latest), React, TypeScript, Recharts, Framer Motion |
+| Real-time comms | WebSocket (`/ws`) — bidirectional: server pushes status+positions; client pushes frames or yt_start/yt_stop |
+| Frontend | Next.js 16, React 19, TypeScript, Recharts 3, Framer Motion 12 |
 | GPU runtime | NVIDIA GeForce GTX 1660 Super (6 GB), CUDA 12.1 |
 | Environment | WSL2 (Ubuntu), Python 3.12, venv at `/mnt/d/MatchIQ/venv/` |
 
@@ -297,19 +397,22 @@ Saved matches are served via `/matches` and `/matches/{id}/*` endpoints, enablin
 ```
 /mnt/d/MatchIQ/          (d:\Ikhlas University\FYP\MatchIQ on Windows)
 ├── .env                        # inside Pipeline/ — ROBOFLOW_API_KEY, HF_TOKEN
-├── .model_cache/               # Roboflow model weights (auto-downloaded)
+├── .model_cache/               # Roboflow model weights + OSNet Re-ID weights
+│   └── osnet_x0_25_msmt17.pt   # Re-ID weights for HybridSort
 ├── requirements.txt            # Pinned dependencies (CPU default; GPU section commented)
 ├── context.txt                 # This file
-├── setup.sh
 │
 ├── Pipeline/
-│   ├── api_server.py           # FastAPI app + MJPEG + WebSocket + cancel + match archiving
-│   ├── Player_Track.py         # Phase 1 — OC-SORT tracking, annotation, on_frame callback
+│   ├── api_server.py           # FastAPI app + MJPEG + WebSocket (bidirectional) + cancel + match archiving
+│   │                           # + model warmup + stream URL resolver + _stream_capture_thread
+│   ├── Player_Track.py         # Phase 1 — HybridSort tracking, annotation, on_frame callback
+│   │                           # + RealTimeTracker class (single-frame processor for RT mode)
+│   │                           # + _sv_to_boxmot / _boxmot_to_sv helpers
 │   ├── Movement_Features.py    # Phase 2 — speed, distance, sprint
 │   ├── Fatigue.py              # Phase 3a — fatigue scoring
 │   ├── goal_prob.py            # Phase 3b — goal probability
 │   ├── Match_Outcome.py        # Phase 4 — MatchOutcomeTracker + Match_Outcome() + calculate_match_outcome()
-│   ├── frame_pipeline.py       # Single-frame orchestrator (batch mode)
+│   ├── frame_pipeline.py       # Single-frame orchestrator (batch mode, mostly commented out)
 │   └── main.py                 # Batch entry point
 │
 ├── Test_Data/
@@ -332,10 +435,12 @@ Saved matches are served via `/matches` and `/matches/{id}/*` endpoints, enablin
 │       ├── 1_goal_predictions.csv
 │       ├── 1_match_predictions.csv
 │       ├── tracked_output.mp4
+│       ├── source_video.mp4     # Raw input copy (saved from commit 2c50821+; used by /rerender)
 │       ├── meta.json
 │       └── names.json           # Player/team name mappings (editable via PUT /matches/{id}/names)
 │
 ├── matchiq_website/            # Next.js frontend
+│   ├── AGENTS.md               # Warning: Next.js 16 has breaking API changes from training data
 │   ├── app/
 │   │   ├── page.tsx            # Home (Hero, Features, HowItWorks, Stats, Testimonials, CTA)
 │   │   ├── demo/               # Main demo page
@@ -358,18 +463,21 @@ Saved matches are served via `/matches` and `/matches/{id}/*` endpoints, enablin
 │       │   ├── TestimonialsSection.tsx
 │       │   └── CTABanner.tsx
 │       ├── demo/
-│       │   ├── DemoClient.tsx       # Upload, WebSocket, tabs orchestration, cancel button
+│       │   ├── DemoClient.tsx       # Upload + Real-time mode toggle, WebSocket, tabs orchestration
 │       │   ├── PlayerNamingModal.tsx # Rename players/teams; PUT /matches/{id}/names
 │       │   └── tabs/
 │       │       ├── VideoTab.tsx         # Live MJPEG canvas + custom post-video player
 │       │       ├── FatigueChart.tsx     # Real data + mock fallback, team filter
 │       │       ├── GoalProbChart.tsx    # Real data + mock fallback
 │       │       ├── MatchOutcomeChart.tsx # Real data + mock fallback, donut gauges
-│       │       └── PitchRadar.tsx       # Live minimap (WebSocket) + scrub all frames post-run
+│       │       └── PitchRadar.tsx       # Rebuilt SVG pitch (SoccerPitchConfiguration vertices+edges)
 │       ├── compare/
 │       │   └── CompareClient.tsx   # Cross-match team comparison
 │       └── analytics/
 │           └── AnalyticsClient.tsx
+│
+├── evaluation/                 # Evaluation report generator (not part of runtime pipeline)
+│   └── generate_report.py      # Generates self-contained HTML evaluation report from CSVs
 │
 └── venv/                       # Python virtual environment
 ```
@@ -378,17 +486,21 @@ Saved matches are served via `/matches` and `/matches/{id}/*` endpoints, enablin
 ## DATA FLOW
 
 ```
+─── UPLOAD MODE ────────────────────────────────────────────────────────────────
+
 User uploads MP4
         │
 POST /upload → saves as Test_Data/Testing.mp4
         │
 POST /run → launches _run_pipeline() in background thread
+  (returns 503 if models not ready yet)
         │          WebSocket /ws connects → client receives status pushes
         │
 Phase 1: Player_Track.py (receives pre-loaded models)
   ├── reads  Test_Data/Testing.mp4
   ├── writes Test_Data/tracked_output_raw.mp4  (mp4v via cv2.VideoWriter)
-  │          └── _StreamingVideoWriter intercepts each frame → _frame_queue
+  │          └── _StreamingVideoWriter intercepts each frame
+  │               only JPEG-encodes when _mjpeg_client_count > 0
   │                   └── GET /stream/frames sends MJPEG to browser canvas
   ├── on_frame callback → _ws_broadcast({type:"positions", rows:[...]})
   │                   └── WS /ws sends live player positions to PitchRadar minimap
@@ -397,58 +509,124 @@ Phase 1: Player_Track.py (receives pre-loaded models)
         │
         ├── [if cancel_event set] → _save_match() → WS push {cancelled:true}
         │
-Phase 2: Movement_Features.py
-  ├── reads  1_tracking.csv
-  └── writes 1_Movement_Features.csv  (includes team_id column)
+Phase 2–4: Movement_Features → Fatigue + goal_prob → Match_Outcome
+  └── writes 5 CSVs to Match_Data_CSV/
         │
-Phase 3: Fatigue.py + goal_prob.py
-  ├── reads  1_tracking.csv, 1_Movement_Features.csv
-  └── writes 1_fatigue_scores.csv, 1_goal_predictions.csv
-        │
-Phase 4: Match_Outcome.py
-  ├── reads  1_tracking.csv, 1_goal_predictions.csv, 1_Movement_Features.csv
-  └── writes 1_match_predictions.csv
-        │
-_save_match() → copies all outputs to Saved_Matches/match_YYYYMMDD_HHMMSS/
+_save_match() → copies all outputs + source_video.mp4 to Saved_Matches/match_YYYYMMDD_HHMMSS/
               → creates names.json (empty)
         │
 WS push {type:"status", done:true, match_id:"match_..."}
         │
-Frontend fetches:
-  GET /results/fatigue          → JSON for FatigueChart
-  GET /results/goal-prob        → JSON for GoalProbChart
-  GET /results/outcome          → JSON (recomputed) for MatchOutcomeChart
-  GET /results/tracking         → JSON for PitchRadar (last frame positions)
-  GET /results/tracking/frames  → JSON for PitchRadar scrubber (all frames sampled ≤1500)
-  GET /video/tracked            → H.264 MP4 file for custom video player
+Frontend fetches all results in parallel:
+
+─── POST-MATCH CORRECTIONS FLOW (optional, from gallery/demo) ─────────────────
+
+User opens PlayerNamingModal → makes corrections (id_merges / team_overrides / role_overrides)
+        │
+POST /matches/{id}/corrections
+  ├── mutates 1_tracking.csv (id merges, team/role overrides)
+  └── re-runs features() → fatigue() → goal_prob() → Match_Outcome() with csv_dir=<match_dir>
+        │
+POST /matches/{id}/rerender (auto-triggered after corrections)
+  ├── reads source_video.mp4 + corrected 1_tracking.csv
+  ├── rerender_video() in daemon thread
+  ├── streams SSE: {"pct": N} ... {"done": true}
+  └── overwrites tracked_output.mp4
+        │
+Frontend: progress bar completes → onCorrectionsApplied() → full results reload
+  GET /results/fatigue, goal-prob, outcome, tracking, tracking/frames
+  GET /video/tracked
+
+─── REAL-TIME STREAM MODE ──────────────────────────────────────────────────────
+
+User pastes YouTube/Twitch URL in RealTimeModePanel
+        │
+WS send {type:"yt_start", url:"..."}
+        │
+Server: _resolve_stream_url(url)
+  ├── subprocess: streamlink --stream-url <url> best  (timeout 20s)
+  └── fallback:   yt-dlp -g --no-playlist <url>       (timeout 30s)
+        │
+_stream_capture_thread starts (daemon):
+  ├── cv2.VideoCapture(direct_url)
+  ├── RealTimeTracker instantiated (uses pre-loaded models)
+  ├── Every other frame: tracker.process_frame(frame)
+  │     → returns (annotated_jpeg, live_rows)
+  ├── WS push {type:"rt_frame", image:<base64>}
+  └── WS push {type:"positions", rows:[...]}
+        │
+Frontend RealTimeModePanel receives:
+  ├── rt_frame → renders on annotRef canvas + buffers in rtFrames[]
+  ├── rt_status → updates status indicator (resolving / streaming / stopped)
+  └── positions → updates PitchRadar live minimap
+        │
+WS send {type:"yt_stop"} → _stream_stop.set() → thread exits
+        │
+POST /realtime/reset → clears _rt_tracker for next session
 ```
 
 
 ## KEY FEATURES
 
-- **Live MJPEG stream** during Phase 1: frontend parses multipart stream via Fetch API,
-  extracts JPEG frames (SOI/EOI markers), renders on `<canvas>` with scrubbing controls.
-- **WebSocket real-time updates** (`/ws`): replaces polling for both pipeline status and
-  live player position data. Every `_STATUS` change and every tracked frame's positions
-  are broadcast to all connected WS clients from the pipeline thread via
-  `asyncio.run_coroutine_threadsafe`. More efficient than HTTP polling.
+- **Dual input modes**: Upload mode (video file) and Real-time mode (YouTube/Twitch URL).
+  Toggled in DemoClient via `inputMode` state ("upload" | "realtime").
+- **Stream URL resolution**: `_resolve_stream_url()` in api_server.py tries streamlink
+  first (best for live streams), falls back to yt-dlp (better for VODs). Both resolved
+  relative to the running Python executable so venv tools are always found.
+- **HybridSort tracking**: switched from OCSORTTracker (`trackers` package) to
+  `boxmot.trackers.hybridsort.hybridsort.HybridSort` with OSNet Re-ID weights
+  (`osnet_x0_25_msmt17.pt`). Uses sparse optical flow (cmc_method='sof') for camera motion
+  compensation. BoxMot bridge helpers `_sv_to_boxmot` / `_boxmot_to_sv` translate between
+  supervision Detections and BoxMot's numpy array format.
+- **Model warmup**: After loading models at startup, a dummy inference is run on each model
+  to trigger CUDA JIT compilation. A `_models_ready` flag gates `/run`; `/status` exposes it.
+- **MJPEG client-aware encoding**: The `_StreamingVideoWriter` only JPEG-encodes frames when
+  at least one `/stream/frames` client is connected (`_mjpeg_client_count > 0`). Saves
+  substantial CPU during Phase 1 when nobody is watching the live preview.
+- **Bidirectional WebSocket**: `/ws` is now fully bidirectional. Clients can push
+  `{type:"frame"}` (webcam/canvas frame for RT processing), `{type:"yt_start"}` (URL stream),
+  or `{type:"yt_stop"}`. The WS disconnect handler sets `_stream_stop` to clean up any
+  active capture thread.
+- **Live MJPEG stream** during Phase 1 (upload mode): frontend parses multipart stream via
+  Fetch API, extracts JPEG frames (SOI/EOI markers), renders on `<canvas>` with scrubbing controls.
 - **Live pitch minimap** (PitchRadar during Phase 1): receives live player positions via
   WebSocket and renders them on an SVG football pitch in real time.
 - **Pitch radar scrubber** (post-pipeline): loads all frames (sampled ≤1500) from
-  `/results/tracking/frames`, then syncs player dot positions to the video player
-  timestamp so the minimap updates as you scrub the tracked video.
+  `/results/tracking/frames`, then syncs player dot positions to the video player timestamp.
+- **Rebuilt PitchRadar SVG**: The SVG pitch renderer was rewritten to use the exact
+  30-vertex, 21-edge layout from `SoccerPitchConfiguration`, with a fixed `viewBox=1050×680`
+  (`preserveAspectRatio="xMidYMid meet"`) so the pitch always has the correct 105:68 aspect
+  ratio. Goals are rendered extending beyond the pitch boundary. Player dot sizing scales
+  with container width. The `H` prop was removed; the container uses `aspectRatio: "105/68"`.
+- **Dynamic video resolution fallback**: `/results/tracking` and `/results/tracking/frames`
+  now derive actual video resolution from `df["x"].max()` / `df["y"].max()` instead of
+  hard-coding 1920×1080, so fallback pixel→% coordinate conversion is correct for any
+  resolution. The `last_frame` lookup also prefers the last frame with valid pitch coords
+  for player/goalkeeper roles.
 - **Custom video player** (post-pipeline): play/pause, seek bar with timestamps,
   speed (0.25×–2×), ±10s skip buttons, fullscreen.
 - **Cancel mid-pipeline**: `POST /cancel` sets a threading.Event; the pipeline checks it
   after every frame (Phase 1) and after each phase. Partial data is archived and
   accessible in the gallery immediately.
-- **OC-SORT tracking**: switched from ByteTrack to OCSORTTracker for more stable player
-  IDs across occlusions, using motion-consistent re-identification.
 - **Team ID smoothing**: rolling-majority pass (50-frame window) over the tracking CSV
   corrects brief team-id flips caused by player occlusion/track-swap artefacts.
 - **Player & team naming** (PlayerNamingModal): after a run completes, users can assign
   custom names to any player ID and each team; names are saved to `names.json` in the
   match folder via `PUT /matches/{id}/names` and surfaced in charts/comparisons.
+- **Post-match corrections** (PlayerNamingModal): users can also fix tracking errors — merge
+  two track IDs into one, force a player's team assignment, or change a player's role. Changes
+  are sent to `POST /matches/{id}/corrections` which rewrites `1_tracking.csv` and re-runs
+  phases 2–4. The corrected video is then re-rendered from `source_video.mp4` via
+  `POST /matches/{id}/rerender` (Server-Sent Events progress bar). Requires `source_video.mp4`
+  to exist in the match folder (saved from commit 2c50821 onward).
+- **`csv_dir` parameter on pipeline functions**: `features()`, `fatigue()`, `goal_prob()`,
+  `Match_Outcome()` all now accept `csv_dir='Match_Data_CSV'` (default) so the `/corrections`
+  endpoint can re-run them against any saved match folder.
+- **Performance tweaks (commit 2c50821 / batch path)**: field refresh interval increased from
+  10 → 30 frames; frame resize now uses `cv2.INTER_NEAREST` instead of `cv2.INTER_LINEAR`;
+  team classifier bootstrap crops increased (STRIDE=30 retained, initial crop buffer larger).
+- **RealTimeTracker performance**: `half=True` (FP16) enabled for faster GPU inference;
+  label text scaled to `text_scale=0.4, text_thickness=1` for cleaner overlay on small renders.
 - **Team colour classification** using unsupervised clustering on player jersey crops —
   no pre-labelled data required.
 - **Pitch coordinate normalisation**: pixel detections mapped to real-world metres
@@ -459,17 +637,16 @@ Frontend fetches:
   `onnxruntime==1.21.1`); GPU packages are commented out.
 - **Persistent match storage**: every completed (or cancelled) pipeline run is archived
   under `Saved_Matches/` with a timestamped folder, `meta.json`, and `names.json`.
-- **Cross-match comparison** (`/compare` page): loads any two saved matches from the API
-  (`/matches`, `/matches/{id}/results/*`), computes per-team snapshots, and renders
+- **Cross-match comparison** (`/compare` page): loads any two saved matches, renders
   head-to-head stat rows, fatigue bar charts, goal probability timelines, and a verdict card.
 - **Movement analytics endpoint** (`/matches/{id}/results/movement`): per-player aggregated
   stats — avg/max speed, total sprints, speed series (sampled ≤60 pts), sprint zones (6 buckets).
-- **Mock data fallback**: all demo tab components (`FatigueChart`, `GoalProbChart`,
-  `MatchOutcomeChart`, `PitchRadar`) render static mock data from `lib/mockData.ts`
-  when `data` prop is `null` (pre-pipeline state), switching to "● Live Data" badge
-  once real data is available.
-- **Model pre-loading**: Roboflow YOLOv8 models are downloaded and cached once at server
-  startup, not on each pipeline run, cutting per-run latency significantly.
+- **Mock data fallback**: all demo tab components render static mock data from `lib/mockData.ts`
+  when `data` prop is `null` (pre-pipeline state), switching to "● Live Data" badge once real.
+- **Model pre-loading**: Roboflow YOLOv8 models loaded once at server startup with JIT warmup,
+  not on each pipeline run.
+- **FastAPI lifespan**: model loading moved from deprecated `@app.on_event("startup")` to
+  `@asynccontextmanager async def _lifespan(app)` (runs model loader in a daemon thread).
 
 
 ## KNOWN ISSUES & CONSTRAINTS
@@ -501,15 +678,29 @@ Frontend fetches:
 ### MJPEG frame queue
 - Queue maxsize = 60 frames. If the browser consumer is slow, frames are silently
   dropped (`queue.Full` exception caught and ignored).
+- JPEG encoding is skipped when no `/stream/frames` clients are connected.
 
-### Single-video limitation
+### Single-video limitation (upload mode)
 - The system processes one video at a time. Concurrent pipeline runs are not supported.
 - Input video is always saved as `Test_Data/Testing.mp4` (overwritten on each upload).
 
-### requirements.txt anomaly
-- The last line of `requirements.txt` contains a stray uvicorn command
-  (`uvicorn api_server:app --reload --port 8000`) — this is harmless but should be
-  removed before distributing the file.
+### source_video.mp4 only in newer matches
+- `POST /matches/{id}/rerender` requires `source_video.mp4` in the match folder.
+- Matches saved before commit 2c50821 (2026-04-25) do NOT have this file.
+- The endpoint returns HTTP 404 with a helpful message if the file is missing.
+
+### BoxMot / HybridSort dependency
+- `boxmot` must be installed separately (not in requirements.txt yet).
+- Re-ID weights file `osnet_x0_25_msmt17.pt` must exist at `.model_cache/`; BoxMot
+  downloads it automatically on first use if the path is writable.
+- The old `trackers` package (`OCSORTTracker`) is no longer used; `RealTimePlayerTracker`
+  (the OC-SORT based class) is fully commented out in Player_Track.py.
+
+### Stream resolution (real-time mode)
+- Requires `streamlink` and/or `yt-dlp` installed in the same venv as the server.
+- Both are resolved relative to `Path(sys.executable).parent` to find venv binaries.
+- If both fail, `/ws` sends `{type:"rt_error"}` with the error message.
+- Only every other frame is processed to reduce latency (`skip_count % 2 != 0`).
 
 ### /results/outcome live recomputation
 - The `GET /results/outcome` endpoint calls `_compute_outcome()` which re-reads and
@@ -517,16 +708,15 @@ Frontend fetches:
   `1_match_predictions.csv`; it recalculates independently using the same formulas.
   This ensures referees/ball are excluded from the live endpoint even if the CSV includes them.
 
-### OC-SORT vs ByteTrack
-- The `trackers` package (`OCSORTTracker`) is used instead of `supervision.ByteTrack`.
-  The `trackers` package must be installed separately (not in requirements.txt as of now).
-  ByteTrack parameters in `context.txt` are **obsolete** — OC-SORT is the active tracker.
-
 ### WebSocket connection manager thread safety
 - `_ws_clients` is a plain list protected by `_ws_lock`. Broadcasts use
   `asyncio.run_coroutine_threadsafe` to schedule sends from the pipeline thread back
   onto the event loop. If a client disconnects mid-broadcast, the exception is silently
   swallowed; the client entry is cleaned up on the next `WebSocketDisconnect`.
+
+### Next.js version
+- The project uses Next.js 16.x which has breaking changes from prior versions.
+- `matchiq_website/AGENTS.md` warns: read `node_modules/next/dist/docs/` before writing code.
 
 
 ## API REFERENCE
@@ -534,16 +724,17 @@ Frontend fetches:
 | Method | Endpoint | Description |
 |---|---|---|
 | POST | `/upload` | Upload MP4; saves to Test_Data/Testing.mp4 |
-| POST | `/run` | Start pipeline in background thread |
+| POST | `/run` | Start pipeline in background thread (503 if models not ready) |
 | POST | `/cancel` | Signal pipeline to stop after current frame; saves partial data |
-| GET | `/status` | `{phase, done, error, running, streaming, cancelled, match_id}` |
-| WS  | `/ws` | Push status changes + live player positions (replaces polling) |
-| GET | `/stream/frames` | MJPEG stream (multipart/x-mixed-replace) |
+| GET | `/status` | `{phase, done, error, running, streaming, cancelled, match_id, models_ready}` |
+| WS  | `/ws` | Bidirectional: server pushes status+positions; client pushes frame/yt_start/yt_stop |
+| GET | `/stream/frames` | MJPEG stream (multipart/x-mixed-replace); only JPEG-encodes when clients connected |
 | GET | `/stream/positions` | Latest frame's player rows JSON (for fallback polling) |
+| POST | `/realtime/reset` | Reset RealTimeTracker state for a new session |
 | GET | `/results/fatigue` | Fatigue scores JSON (referees/ball excluded) |
 | GET | `/results/goal-prob` | Goal probability over time JSON (sampled to ≤150 points) |
 | GET | `/results/outcome` | Match outcome JSON (live-recomputed from CSVs) |
-| GET | `/results/tracking` | Last-frame player positions JSON (pitch % coords) |
+| GET | `/results/tracking` | Last-frame player positions JSON (pitch % coords, dynamic resolution) |
 | GET | `/results/tracking/frames` | All frames sampled (≤1500); for PitchRadar scrubber |
 | GET | `/video/tracked` | Final annotated H.264 MP4 (supports Range requests) |
 | GET | `/download/csv` | ZIP archive of all output CSVs |
@@ -557,6 +748,8 @@ Frontend fetches:
 | GET | `/matches/{id}/results/movement` | Per-player movement stats (avg/max speed, sprints) |
 | GET | `/matches/{id}/names` | Player/team name mappings (from names.json) |
 | PUT | `/matches/{id}/names` | Save/update player and team name mappings |
+| POST | `/matches/{id}/corrections` | Apply id_merges/team_overrides/role_overrides to tracking CSV, re-run phases 2–4 |
+| POST | `/matches/{id}/rerender` | Re-annotate source_video.mp4 with corrected CSV; streams SSE progress |
 | GET | `/matches/{id}/video` | Saved match annotated MP4 |
 
 Backend runs on `http://localhost:8000`.
@@ -596,9 +789,9 @@ npm run dev
 - Fatigue scoring uses relative performance drop, not absolute physiological data.
 - The field detection model must detect enough keypoints to establish homography;
   if it fails, pitch_x/pitch_y are None and all pitch-coordinate features are skipped.
-- Player IDs are OC-SORT-local (per-video, not cross-match persistent); the Compare
+- Player IDs are HybridSort-local (per-video, not cross-match persistent); the Compare
   page therefore matches players by label string, only showing rows common to both matches.
 - `/results/outcome` and `/matches/{id}/results/outcome` recompute stats from raw CSVs
   every call; `1_match_predictions.csv` is written for reference but not read by the API.
-- The `trackers` package (for OCSORTTracker) must be installed manually; it is not yet
-  listed in `requirements.txt`.
+- `boxmot` and Re-ID weights (`osnet_x0_25_msmt17.pt`) must be installed/present.
+- Real-time stream mode requires `streamlink` and/or `yt-dlp` installed in the venv.

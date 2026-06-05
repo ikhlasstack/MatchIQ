@@ -10,6 +10,7 @@ import MatchOutcomeChart from "@/components/demo/tabs/MatchOutcomeChart";
 import PitchRadar from "@/components/demo/tabs/PitchRadar";
 import VideoTab from "@/components/demo/tabs/VideoTab";
 import PlayerNamingModal, { type NamesMap } from "@/components/demo/PlayerNamingModal";
+import PlayerDrawer, { type OverlayRow, type MovementRow } from "@/components/demo/PlayerDrawer";
 import type { FatigueRow, GoalProbRow, OutcomeData, TrackingRow, AllTrackingData } from "@/components/demo/DemoClient";
 
 const API = "http://localhost:8000";
@@ -41,6 +42,7 @@ export default function MatchResultsClient({ matchId }: { matchId: string }) {
   const [outcomeData,  setOutcomeData]  = useState<OutcomeData | null>(null);
   const [trackingData,    setTrackingData]    = useState<TrackingRow[] | null>(null);
   const [allTrackingData, setAllTrackingData] = useState<AllTrackingData | null>(null);
+  const [movementData,    setMovementData]    = useState<MovementRow[] | null>(null);
   const [currentFrame,    setCurrentFrame]    = useState(0);
   const [loading,         setLoading]         = useState(true);
   const [error,           setError]           = useState<string | null>(null);
@@ -56,7 +58,7 @@ export default function MatchResultsClient({ matchId }: { matchId: string }) {
 
   const loadResults = useCallback(async () => {
     try {
-      const [metaRes, fat, goal, out, track, allTrack, savedNames] = await Promise.all([
+      const [metaRes, fat, goal, out, track, allTrack, savedNames, mov] = await Promise.all([
         fetch(`${API}/matches/${matchId}`).then(r => {
           if (!r.ok) throw new Error("Match not found");
           return r.json();
@@ -67,6 +69,7 @@ export default function MatchResultsClient({ matchId }: { matchId: string }) {
         fetch(`${API}/matches/${matchId}/results/tracking`).then(r => r.json()),
         fetch(`${API}/matches/${matchId}/results/tracking/frames`).then(r => r.json()),
         fetch(`${API}/matches/${matchId}/names`).then(r => r.ok ? r.json() : { players: {}, teams: {} }),
+        fetch(`${API}/matches/${matchId}/results/movement`).then(r => r.ok ? r.json() : []),
       ]);
       setMeta(metaRes);
       setFatigueData(fat);
@@ -75,6 +78,7 @@ export default function MatchResultsClient({ matchId }: { matchId: string }) {
       setTrackingData(track);
       setAllTrackingData(allTrack);
       setNames(savedNames);
+      setMovementData(mov);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Could not load match data. Is the backend running?");
     } finally {
@@ -185,38 +189,70 @@ export default function MatchResultsClient({ matchId }: { matchId: string }) {
       </div>
 
       {/* Tab content */}
-      <div className="wrap" style={{ paddingTop: "2rem", paddingBottom: "3rem" }}>
-        <div style={{ position: "relative", minHeight: "520px" }}>
-          <AnimatePresence mode="wait">
-            <motion.div key={activeTab}
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -8 }}
-              transition={{ duration: 0.2 }}>
-              {activeTab === "video"   && (
-                <VideoTab
-                  done={true}
-                  isStreaming={false}
-                  phase={4}
-                  videoUrl={videoUrl}
-                  onFrameChange={handleFrameChange}
-                />
-              )}
-              {activeTab === "fatigue" && <FatigueChart data={fatigueData} names={names} />}
-              {activeTab === "goal"    && <GoalProbChart data={goalProbData} names={names} />}
-              {activeTab === "outcome" && <MatchOutcomeChart data={outcomeData} names={names} />}
-            </motion.div>
-          </AnimatePresence>
+      <div className="wrap" style={{ paddingTop: "1.25rem", paddingBottom: "2rem" }}>
+        <div style={{ display: "grid", gridTemplateColumns: activeTab === "video" ? "1fr auto" : "1fr", gap: "1.5rem", alignItems: "start" }}>
+          <div style={{ position: "relative", minHeight: "520px" }}>
+            <AnimatePresence mode="wait">
+              <motion.div key={activeTab}
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -8 }}
+                transition={{ duration: 0.2 }}>
+                {activeTab === "video"   && (
+                  <VideoTab
+                    done={true}
+                    isStreaming={false}
+                    phase={4}
+                    videoUrl={videoUrl}
+                    onFrameChange={handleFrameChange}
+                  />
+                )}
+                {activeTab === "fatigue" && <FatigueChart data={fatigueData} names={names} />}
+                {activeTab === "goal"    && <GoalProbChart data={goalProbData} names={names} />}
+                {activeTab === "outcome" && <MatchOutcomeChart data={outcomeData} names={names} />}
+              </motion.div>
+            </AnimatePresence>
 
-          {activeTab === "video" && (
-            <PitchRadar
-              data={trackingData}
-              allData={allTrackingData}
-              currentFrame={currentFrame}
-              names={names}
-              floating
-            />
-          )}
+            {activeTab === "video" && (
+              <PitchRadar
+                data={trackingData}
+                allData={allTrackingData}
+                currentFrame={currentFrame}
+                names={names}
+                floating
+              />
+            )}
+          </div>
+
+          {activeTab === "video" && (() => {
+            const frameRows: OverlayRow[] | null = (() => {
+              if (!allTrackingData) return trackingData as OverlayRow[] | null;
+              const keys = Object.keys(allTrackingData.frames);
+              if (!keys.length) return trackingData as OverlayRow[] | null;
+              const best = keys.reduce((a, b) =>
+                Math.abs(Number(a) - currentFrame) <= Math.abs(Number(b) - currentFrame) ? a : b);
+              return (allTrackingData.frames[best] ?? trackingData) as OverlayRow[] | null;
+            })();
+            return (
+              <div style={{ position: "sticky", top: "120px" }}>
+                <PlayerDrawer
+                  rows={frameRows}
+                  names={names}
+                  movement={movementData}
+                  teamOverrides={teamOverrides}
+                  roleOverrides={roleOverrides}
+                  onTeamOverride={(id, team) => setTeamOverrides(p => ({ ...p, [id]: team }))}
+                  onRoleOverride={(id, role) => setRoleOverrides(p => ({ ...p, [id]: role }))}
+                  onNameChange={(id, name) => setNames(p => ({ ...p, players: { ...p.players, [String(id)]: name } }))}
+                  onNameSave={() => fetch(`${API}/matches/${matchId}/names`, {
+                    method: "PUT",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(names),
+                  })}
+                />
+              </div>
+            );
+          })()}
         </div>
       </div>
     </div>

@@ -271,6 +271,138 @@ def resolve_goalkeepers_team_id(players, goalkeepers):
     return np.array(goalkeepers_team_id)
 
 
+GK_PITCH_MIDLINE = 52.5  # metres — halfway line on a 105m pitch
+GK_SIDE_LO       = 25.0  # pitch-X below this → left GK (pink/red)
+GK_SIDE_HI       = 80.0  # pitch-X above this → right GK (blue)
+
+
+def _assign_gk_team_color(goalkeepers, gk_side_locked, positions, orig_w):
+    """Assign team color (class_id) to goalkeepers based purely on pitch-X position.
+
+    Left GK  (pitch-X < midline) → class_id=1 (pink/red)
+    Right GK (pitch-X > midline) → class_id=0 (blue)
+
+    Boxmot tracker IDs are left untouched — only class_id is written.
+    gk_side_locked: {'left': bool, 'right': bool} — once a side is locked it stays
+    locked forever, immune to boxmot re-IDs on re-entry.
+
+    Goalkeepers are identified by the player detection model (GOALKEEPER_ID class).
+    Pitch-X comes from the field-homography produced by the field detection model.
+    """
+    if len(goalkeepers) == 0 or goalkeepers.tracker_id is None:
+        return
+
+    gk_feet = goalkeepers.get_anchors_coordinates(sv.Position.BOTTOM_CENTER)
+    n = len(goalkeepers)
+
+    if positions is not None and len(positions) == n:
+        xs = [float(positions[i][0]) for i in range(n)]
+    else:
+        xs = [float(gk_feet[i][0]) / orig_w * 105.0 for i in range(n)]
+
+    def _commit(det_i, side):
+        gk_side_locked[side]        = True
+        goalkeepers.class_id[det_i] = 1 if side == 'left' else 0
+
+    if n >= 2:
+        # Both GKs visible — unambiguous: smallest pitch-X is left, largest is right.
+        order = sorted(range(n), key=lambda k: xs[k])
+        _commit(order[0], 'left')
+        _commit(order[-1], 'right')
+        return
+
+    # Single GK — assign based on pitch-X relative to goal-zone thresholds.
+    for i in range(n):
+        x = xs[i]
+        left_locked  = gk_side_locked.get('left',  False)
+        right_locked = gk_side_locked.get('right', False)
+
+        if x < GK_SIDE_LO:
+            _commit(i, 'left')
+        elif x > GK_SIDE_HI:
+            _commit(i, 'right')
+        elif left_locked and not right_locked:
+            _commit(i, 'right')
+        elif right_locked and not left_locked:
+            _commit(i, 'left')
+        else:
+            # Ambiguous midfield — assign by midline proximity without locking.
+            goalkeepers.class_id[i] = 1 if x < GK_PITCH_MIDLINE else 0
+
+
+def draw_direction_chevrons(frame: np.ndarray, player_detections: sv.Detections,
+                            pixel_history: dict, min_speed_px: float = 2.0) -> np.ndarray:
+    """Draw a filled direction chevron at each player's foot ellipse.
+
+    Uses smoothed positional delta over the last N frames to determine direction —
+    immune to the sign-flip bug that happens with velocity-based approaches on deceleration.
+    """
+    if len(player_detections) == 0 or player_detections.tracker_id is None:
+        return frame
+
+    _TEAM_BGR = {
+        0: (0xFF, 0xBF, 0x00),
+        1: (0x93, 0x14, 0xFF),
+        2: (0x00, 0xD7, 0xFF),
+    }
+    MIN_SPEED = min_speed_px
+    out = frame.copy()
+
+    for i, tid in enumerate(player_detections.tracker_id):
+        tid_int = int(tid)
+        xyxy = player_detections.xyxy[i]
+        cx   = float((xyxy[0] + xyxy[2]) / 2)
+        cy   = float(xyxy[3])               # foot y
+        box_w = float(xyxy[2] - xyxy[0])
+        box_h = float(xyxy[3] - xyxy[1])
+
+        hist = pixel_history.setdefault(tid_int, [])
+        hist.append((cx, cy))
+        if len(hist) > 8:
+            hist.pop(0)
+
+        # Direction from oldest to newest position in the history window
+        if len(hist) < 3:
+            continue
+        dx = hist[-1][0] - hist[0][0]
+        dy = hist[-1][1] - hist[0][1]
+        dist = np.sqrt(dx * dx + dy * dy)
+        if dist < MIN_SPEED:
+            continue
+
+        ux, uy = dx / dist, dy / dist
+
+        team  = int(player_detections.class_id[i]) if player_detections.class_id is not None else 2
+        color = _TEAM_BGR.get(team, _TEAM_BGR[2])
+
+        rx = box_w / 2.0
+        ry = box_h * 0.175
+
+        OFFSET = rx * 0.4
+        SIZE   = rx * 0.52
+
+        tip_x = cx + ux * (rx + OFFSET + SIZE * 1.2)
+        tip_y = cy + uy * (ry + OFFSET + SIZE * 1.2)
+        px_, py_ = -uy, ux
+        base_cx = cx + ux * (rx + OFFSET)
+        base_cy = cy + uy * (ry + OFFSET)
+        p1  = (int(base_cx + px_ * SIZE), int(base_cy + py_ * SIZE))
+        p2  = (int(base_cx - px_ * SIZE), int(base_cy - py_ * SIZE))
+        tip = (int(tip_x), int(tip_y))
+
+        YELLOW = (0x00, 0xD4, 0xFF)  # BGR: #FFD400
+        pts = np.array([p1, tip, p2], dtype=np.int32)
+        cv2.fillPoly(out, [pts], (0, 0, 0))
+        shrunk = np.array([
+            (int(p1[0] * 0.85 + tip[0] * 0.15), int(p1[1] * 0.85 + tip[1] * 0.15)),
+            tip,
+            (int(p2[0] * 0.85 + tip[0] * 0.15), int(p2[1] * 0.85 + tip[1] * 0.15)),
+        ], dtype=np.int32)
+        cv2.fillPoly(out, [shrunk], YELLOW)
+
+    return out
+
+
 def process_all_frames(PLAYER_DETECTION_MODEL, FIELD_DETECTION_MODEL, CONFIG, team_classifier, on_frame=None, cancel_event=None):
     ellipse_annotator = sv.EllipseAnnotator(
         color=sv.ColorPalette.from_hex(['#00BFFF', '#FF1493', '#FFD700']),
@@ -279,7 +411,10 @@ def process_all_frames(PLAYER_DETECTION_MODEL, FIELD_DETECTION_MODEL, CONFIG, te
     label_annotator = sv.LabelAnnotator(
         color=sv.ColorPalette.from_hex(['#00BFFF', '#FF1493', '#FFD700']),
         text_color=sv.Color.from_hex('#000000'),
-        text_position=sv.Position.BOTTOM_CENTER
+        text_position=sv.Position.BOTTOM_CENTER,
+        text_scale=0.5,
+        text_thickness=1,
+        text_padding=6,
     )
     triangle_annotator = sv.TriangleAnnotator(
         color=sv.Color.from_hex('#FFD700'),
@@ -321,7 +456,7 @@ def process_all_frames(PLAYER_DETECTION_MODEL, FIELD_DETECTION_MODEL, CONFIG, te
     # Field detection cache — re-run every N frames instead of every frame
     FIELD_REFRESH_INTERVAL = 30
     cached_transformer: ViewTransformer | None = None
-    _best_kp_span = 0.0   # x-span (metres) of the keypoints used for the current best transformer
+    _best_kp_span = 0.0
 
     # Team classifier cache — keyed by tracker_id, refreshed every M frames
     TEAM_CLASSIFY_INTERVAL = 5
@@ -330,14 +465,16 @@ def process_all_frames(PLAYER_DETECTION_MODEL, FIELD_DETECTION_MODEL, CONFIG, te
     # ========== Track history for preventing ID misuse ==========
     track_last_pitch = {}      # track_id -> np.array([pitch_x, pitch_y])
     track_team_history = {}    # track_id -> last assigned team (0 or 1)
+    pixel_history = {}         # track_id -> list of (cx, cy) pixel positions for direction
     MAX_PITCH_JUMP = 15.0      # metres – maximum plausible movement between frames
-    gk_last_seen  = {}         # track_id -> last frame_number the GK was detected
-    gk_pitch_side = {}         # track_id -> 'left' | 'right' | None, set once GK is seen near a goal
-    _fresh_id_counter = [90000]
-    GK_MAX_GAP   = 1000          # frames (~3s at 30fps) — gap longer than this = different GK
-    GK_SIDE_LO   = 25.0        # metres from left goal line to register as 'left' GK
-    GK_SIDE_HI   = 80.0        # metres — to register as 'right' GK
-    # =================================================================
+    gk_side_locked     = {}   # 'left'/'right' -> True once that side is permanently assigned
+    gk_last_seen       = {}   # tracker_id -> last frame seen as goalkeeper
+    GK_MAX_AGE         = 300  # ~10s at 30fps — evict stale GK IDs after this gap
+    # Permanent tracker-ID registry for each GK side.
+    # Once a side is first confirmed, its tracker ID is reserved forever.
+    # team_id 1 = left GK, team_id 0 = right GK (matches _assign_gk_team_color).
+    gk_side_id: dict[str, int] = {}   # 'left'/'right' -> reserved tracker ID
+    team_label_flipped: bool | None = None  # True = KMeans labels flipped vs GK colors
 
     INFER_SIZE = 640
     orig_h, orig_w = None, None
@@ -363,140 +500,183 @@ def process_all_frames(PLAYER_DETECTION_MODEL, FIELD_DETECTION_MODEL, CONFIG, te
         ball_detections = detections[detections.class_id == BALL_ID]
         ball_detections.xyxy = sv.pad_boxes(xyxy=ball_detections.xyxy, px=10)
 
-        # 3. Track players
-        player_detections = detections[detections.class_id != BALL_ID]
-        player_detections = player_detections.with_nms(threshold=0.5, class_agnostic=False)
-        player_detections = _boxmot_to_sv(tracker.update(_sv_to_boxmot(player_detections), frame))
+        # 3. Track players/GKs only — referees are excluded from the tracker
+        #    so they never get assigned persistent IDs.
+        non_ball = detections[detections.class_id != BALL_ID]
+        non_ball = non_ball.with_nms(threshold=0.5, class_agnostic=False)
+        referee_dets_raw = non_ball[non_ball.class_id == REFEREE_ID]
+        trackable        = non_ball[non_ball.class_id != REFEREE_ID]
 
-        # 4. Split by role BEFORE class_ids get changed
-        goalkeepers = player_detections[player_detections.class_id == GOALKEEPER_ID]
-        players     = player_detections[player_detections.class_id == PLAYER_ID]
-        referees    = player_detections[player_detections.class_id == REFEREE_ID]
+        # Drop detections whose foot position lands outside the pitch (uses cached homography)
+        if cached_transformer is not None and len(trackable) > 0:
+            feet = trackable.get_anchors_coordinates(sv.Position.BOTTOM_CENTER)
+            pitch_pts = cached_transformer.transform_points(feet)
+            on_pitch = (
+                (pitch_pts[:, 0] >= -5) & (pitch_pts[:, 0] <= 110) &
+                (pitch_pts[:, 1] >= -5) & (pitch_pts[:, 1] <= 73)
+            )
+            trackable = trackable[on_pitch]
 
-        gk_ids  = set(goalkeepers.tracker_id.tolist()) if goalkeepers.tracker_id is not None else set()
-        ref_ids = set(referees.tracker_id.tolist()) if referees.tracker_id is not None else set()
+        player_detections = _boxmot_to_sv(tracker.update(_sv_to_boxmot(trackable), frame))
 
-        # 5. Get pitch transformer (cached)
-        # Only replace the cached transformer when the new keypoints span a greater
-        # x-range on the pitch than the current best — prevents a partial-view homography
-        # (e.g. right half only) from replacing a full-pitch one as the camera pans back.
+        ref_ids: set = set()  # referees are never tracked; kept as empty set for role labelling
+
+        # 4. Get pitch transformer (cached, refresh every N frames)
         if frame_number % FIELD_REFRESH_INTERVAL == 0:
             try:
                 result_field = FIELD_DETECTION_MODEL.infer(small_frame, confidence=0.3)[0]
                 key_points   = sv.KeyPoints.from_inference(result_field)
                 key_points.xy[0][:, 0] *= scale_x
                 key_points.xy[0][:, 1] *= scale_y
-                kp_filter    = key_points.confidence[0] > 0.5
+                kp_filter    = key_points.confidence[0] > 0.75
                 frame_ref    = key_points.xy[0][kp_filter]
                 pitch_ref    = np.array(CONFIG.vertices)[kp_filter]
-                if len(frame_ref) >= 4:
+                print(f"[FIELD frm={frame_number}] kp>0.75={int(kp_filter.sum())}/{len(kp_filter)}  top8={np.sort(key_points.confidence[0])[::-1][:8].round(2).tolist()}", flush=True)
+                if len(frame_ref) >= 6:
+                    candidate = ViewTransformer(source=frame_ref, target=pitch_ref)
+                    if len(non_ball) > 0:
+                        all_feet  = non_ball.get_anchors_coordinates(sv.Position.BOTTOM_CENTER)
+                        proj_feet = candidate.transform_points(all_feet)
+                        on_pitch  = (
+                            (proj_feet[:, 0] >= -20) & (proj_feet[:, 0] <= 125) &
+                            (proj_feet[:, 1] >= -20) & (proj_feet[:, 1] <= 88)
+                        )
+                        pct_on = float(on_pitch.sum()) / len(all_feet)
+                    else:
+                        pct_on = 1.0
                     kp_span = float(pitch_ref[:, 0].max() - pitch_ref[:, 0].min())
-                    if kp_span >= _best_kp_span:
-                        cached_transformer = ViewTransformer(source=frame_ref, target=pitch_ref)
-                        _best_kp_span = kp_span
-            except:
-                pass
+                    print(f"[FIELD frm={frame_number}] pct_on_pitch={pct_on:.2f}  kp_span={kp_span:.0f}  best_span={_best_kp_span:.0f}", flush=True)
+                    if pct_on >= 0.4 and kp_span >= _best_kp_span:
+                        cached_transformer = candidate
+                        _best_kp_span      = kp_span
+            except Exception as _fe:
+                print(f"[FIELD frm={frame_number}] error: {_fe}", flush=True)
         transformer = cached_transformer
         has_transform = transformer is not None
 
-        # ---------- Prevent teleporting IDs + wrong-half GK collision ----------
+        # 5. Teleport guard — update position history for all tracked detections
         if has_transform and player_detections.tracker_id is not None:
-            positions = player_detections.get_anchors_coordinates(sv.Position.BOTTOM_CENTER)
-            pitch_positions = transformer.transform_points(positions)
+            _all_feet   = player_detections.get_anchors_coordinates(sv.Position.BOTTOM_CENTER)
+            _all_pitch  = transformer.transform_points(_all_feet)
+            for _i, _tid in enumerate(player_detections.tracker_id):
+                _tid_int = int(_tid)
+                _cur     = _all_pitch[_i]
+                if _tid_int not in track_last_pitch or \
+                        np.linalg.norm(_cur - track_last_pitch[_tid_int]) <= MAX_PITCH_JUMP:
+                    track_last_pitch[_tid_int] = _cur
 
-            new_ids = player_detections.tracker_id.copy()
-            for i, tid in enumerate(new_ids):
-                current_pos = pitch_positions[i]
-                tid_int = int(tid)
+        # 6. Assign GK team color — fresh slice, pitch-X based, boxmot IDs untouched
+        goalkeepers = player_detections[player_detections.class_id == GOALKEEPER_ID]
+        if len(goalkeepers) > 0:
+            # Evict any GK tracker ID that was absent for > GK_MAX_AGE frames.
+            # This prevents a returning player from re-using a stale GK ID.
+            for _gi in range(len(goalkeepers)):
+                _tid = int(goalkeepers.tracker_id[_gi])
+                last = gk_last_seen.get(_tid)
+                if last is not None and (frame_number - last) > GK_MAX_AGE:
+                    _all_frame_ids = set(int(t) for t in player_detections.tracker_id) if player_detections.tracker_id is not None else set()
+                    _next = max(_all_frame_ids) + 1 if _all_frame_ids else frame_number + 90000
+                    goalkeepers.tracker_id[_gi] = _next
+                    _tid = _next
+                gk_last_seen[_tid] = frame_number
 
-                # Teleport check (all roles) — skip position update only, don't skip GK check
-                is_teleport = False
-                if tid_int in track_last_pitch:
-                    dist = np.linalg.norm(current_pos - track_last_pitch[tid_int])
-                    if dist > MAX_PITCH_JUMP:
-                        is_teleport = True
-                if not is_teleport:
-                    track_last_pitch[tid_int] = current_pos
+            gk_feet_raw  = goalkeepers.get_anchors_coordinates(sv.Position.BOTTOM_CENTER)
+            gk_pitch_pos = transformer.transform_points(gk_feet_raw) if has_transform else None
+            print(f"[GK frm={frame_number}] n={len(goalkeepers)} "
+                  f"pitch_xs={[round(float(gk_pitch_pos[i][0]),1) for i in range(len(goalkeepers))] if gk_pitch_pos is not None else 'no_transform'} "
+                  f"locked={gk_side_locked}", flush=True)
+            _assign_gk_team_color(goalkeepers, gk_side_locked, gk_pitch_pos, orig_w)
 
-                # Goalkeeper re-link prevention.
-                # Two independent signals — either one triggers a new ID:
-                #   1. Long absence: GK ID unseen for > GK_MAX_GAP frames means it's
-                #      a different person (the original left the frame entirely).
-                #   2. Wrong side: once a GK is confirmed to one goal end, they can't
-                #      suddenly appear near the opposite goal.
-                if tid_int in gk_ids:
-                    px = current_pos[0]
+            # Enforce permanent per-side tracker IDs so the two GKs always have
+            # distinct, stable IDs regardless of when they enter/leave frame.
+            # class_id 1 = left GK, class_id 0 = right GK.
+            _all_frame_ids = set(int(t) for t in player_detections.tracker_id) if player_detections.tracker_id is not None else set()
+            _side_map = {1: 'left', 0: 'right'}
+            for _gi in range(len(goalkeepers)):
+                _team = int(goalkeepers.class_id[_gi])
+                _side = _side_map.get(_team)
+                if _side is None:
+                    continue
+                _cur_tid = int(goalkeepers.tracker_id[_gi])
+                if _side not in gk_side_id:
+                    # First confirmed sighting of this side — reserve this tracker ID.
+                    gk_side_id[_side] = _cur_tid
+                elif gk_side_id[_side] != _cur_tid:
+                    # Tracker gave a different ID — remap back to the reserved one.
+                    goalkeepers.tracker_id[_gi] = gk_side_id[_side]
 
-                    # Register canonical side the first time we see this GK near a goal
-                    if tid_int not in gk_pitch_side:
-                        if px < GK_SIDE_LO:
-                            gk_pitch_side[tid_int] = 'left'
-                        elif px > GK_SIDE_HI:
-                            gk_pitch_side[tid_int] = 'right'
-                        else:
-                            gk_pitch_side[tid_int] = None  # midfield — not yet confirmed
+            # Deduplicate: if two GKs still share an ID after remapping,
+            # give the second a new free ID (should be very rare).
+            seen_gk_ids: set = set()
+            for _gi in range(len(goalkeepers)):
+                _gid = int(goalkeepers.tracker_id[_gi])
+                if _gid in seen_gk_ids:
+                    _next = max(_all_frame_ids) + 1
+                    goalkeepers.tracker_id[_gi] = _next
+                    _all_frame_ids.add(_next)
+                seen_gk_ids.add(int(goalkeepers.tracker_id[_gi]))
+            print(f"[GK frm={frame_number}] after → ids={goalkeepers.tracker_id.tolist()} class_ids={goalkeepers.class_id.tolist()} registry={gk_side_id}", flush=True)
+        gk_ids = set(goalkeepers.tracker_id.tolist()) if goalkeepers.tracker_id is not None else set()
 
-                    long_absence = (
-                        tid_int in gk_last_seen and
-                        (frame_number - gk_last_seen[tid_int]) > GK_MAX_GAP
-                    )
-                    canonical_side = gk_pitch_side.get(tid_int)
-                    wrong_side = (
-                        (canonical_side == 'left'  and px > GK_SIDE_HI) or
-                        (canonical_side == 'right' and px < GK_SIDE_LO)
-                    )
-
-                    if long_absence or wrong_side:
-                        fresh_id = _fresh_id_counter[0]
-                        _fresh_id_counter[0] += 1
-                        new_ids[i] = fresh_id
-                        # Inherit side for the new ID from where they actually are
-                        if px < GK_SIDE_LO:
-                            gk_pitch_side[fresh_id] = 'left'
-                        elif px > GK_SIDE_HI:
-                            gk_pitch_side[fresh_id] = 'right'
-                        else:
-                            gk_pitch_side[fresh_id] = None
-                        if not is_teleport:
-                            track_last_pitch[fresh_id] = current_pos
-                    else:
-                        gk_last_seen[tid_int] = frame_number
-
-            player_detections.tracker_id = new_ids
-        # -------------------------------------------------------------------------
-
-        # 6. Classify teams (throttled)
+        # 7. Classify player teams (throttled) — fresh slice after GK IDs are settled
+        players = player_detections[player_detections.class_id == PLAYER_ID]
         if len(players) > 0:
             if frame_number % TEAM_CLASSIFY_INTERVAL == 0:
                 player_crops = [sv.crop_image(frame, xyxy) for xyxy in players.xyxy]
-                new_ids = team_classifier.predict(player_crops)
-                for tid, cls in zip(players.tracker_id, new_ids):
-                    team_id_cache[int(tid)] = int(cls)
-            players.class_id = np.array(
-                [team_id_cache.get(int(tid), 0) for tid in players.tracker_id]
-            )
+                new_team_ids = team_classifier.predict(player_crops)
+                _reserved_gk_ids = set(gk_side_id.values())
+                for tid, cls in zip(players.tracker_id, new_team_ids):
+                    if int(tid) not in _reserved_gk_ids:
+                        team_id_cache[int(tid)] = int(cls)
 
-        if len(goalkeepers) > 0 and len(players) > 0:
-            goalkeepers.class_id = resolve_goalkeepers_team_id(players, goalkeepers)
+            # Resolve KMeans label orientation using outfield players near GKs with known
+            # pitch-side team assignments.  GK jerseys are a third colour (FIFA rule) so
+            # predicting GK crops with the outfield KMeans classifier is unreliable.
+            if team_label_flipped is None and len(goalkeepers) >= 2 and len(players) >= 4:
+                # Both GKs have pitch-side class_ids (0/1) set by _assign_gk_team_color.
+                # Sample a few outfield players closest to each GK and check which KMeans
+                # label the classifier assigns them against the GK's known team.
+                gk_positions = goalkeepers.get_anchors_coordinates(sv.Position.BOTTOM_CENTER)
+                pl_positions = players.get_anchors_coordinates(sv.Position.BOTTOM_CENTER)
+                votes_match = 0
+                votes_total = 0
+                for gi in range(len(goalkeepers)):
+                    gk_team = int(goalkeepers.class_id[gi])
+                    if gk_team < 0:
+                        continue
+                    dists = np.linalg.norm(pl_positions - gk_positions[gi], axis=1)
+                    nearest = np.argsort(dists)[:3]
+                    near_crops = [sv.crop_image(frame, players.xyxy[pi]) for pi in nearest]
+                    near_preds = team_classifier.predict(near_crops)
+                    votes_match += int(np.sum(near_preds == gk_team))
+                    votes_total += len(near_preds)
+                if votes_total > 0:
+                    team_label_flipped = (votes_match / votes_total) < 0.5
+                    print(f"[TEAM frm={frame_number}] flip={team_label_flipped} match={votes_match}/{votes_total}", flush=True)
 
-        if len(referees) > 0:
-            referees.class_id = np.full(len(referees), -1, dtype=int)
+            players.class_id = np.array([
+                (1 - team_id_cache.get(int(tid), 0)) if team_label_flipped
+                else team_id_cache.get(int(tid), 0)
+                for tid in players.tracker_id
+            ])
 
-        player_detections = sv.Detections.merge([players, goalkeepers, referees])
+        # Rebuild final merged detections from fresh, correctly-labelled slices
+        player_detections = sv.Detections.merge([players, goalkeepers])
 
-        # ---------- Prevent team flips (additional safeguard) ----------
+        # Team flip guard
         if player_detections.tracker_id is not None:
-            new_ids = player_detections.tracker_id.copy()
-            for i, tid in enumerate(new_ids):
-                team = player_detections.class_id[i]
-                if tid in track_team_history:
-                    if track_team_history[tid] != team and team != -1:
-                        # Team flip – revert class_id to the known team instead of bumping the ID
-                        player_detections.class_id[i] = track_team_history[int(tid)]
-                elif team != -1:
+            for i, tid in enumerate(player_detections.tracker_id):
+                if int(tid) in gk_ids:
+                    continue
+                team = int(player_detections.class_id[i])
+                if team == -1:
+                    continue
+                prev = track_team_history.get(int(tid))
+                if prev is None:
                     track_team_history[int(tid)] = team
-            player_detections.tracker_id = new_ids
-        # -----------------------------------------------------------------
+                elif prev != team:
+                    track_team_history[int(tid)] = team
+                    player_detections.class_id[i] = team
 
         # 7. Save ball to CSV
         if len(ball_detections) > 0:
@@ -542,14 +722,17 @@ def process_all_frames(PLAYER_DETECTION_MODEL, FIELD_DETECTION_MODEL, CONFIG, te
         # Fire live positions callback for minimap streaming (throttled to every 3 frames)
         if on_frame is not None and frame_number % 3 == 0:
             live_rows = []
+            seen_ids: set = set()
             if positions is not None:
                 for i, tid in enumerate(player_detections.tracker_id):
                     tid_int = int(tid)
+                    if tid_int in seen_ids:
+                        continue
+                    seen_ids.add(tid_int)
                     role = 'goalkeeper' if tid_int in gk_ids else ('referee' if tid_int in ref_ids else 'player')
                     if pitch_positions is not None:
                         nx = round(float(pitch_positions[i][0]) / 105 * 100, 2)
                         ny = round(float(pitch_positions[i][1]) / 68  * 100, 2)
-                        # Drop players the homography extrapolates outside the pitch
                         if not (0.0 <= nx <= 100.0 and 0.0 <= ny <= 100.0):
                             continue
                     else:
@@ -588,6 +771,12 @@ def process_all_frames(PLAYER_DETECTION_MODEL, FIELD_DETECTION_MODEL, CONFIG, te
 
         annotated_frame = ellipse_annotator.annotate(frame, player_detections)
         annotated_frame = label_annotator.annotate(annotated_frame, player_detections, labels)
+        annotated_frame = draw_direction_chevrons(annotated_frame, player_detections, pixel_history)
+        # Annotate referees without labels (no tracker ID)
+        if len(referee_dets_raw) > 0:
+            ref_vis = referee_dets_raw[np.ones(len(referee_dets_raw), dtype=bool)]
+            ref_vis.class_id = np.full(len(ref_vis), 2, dtype=int)
+            annotated_frame = ellipse_annotator.annotate(annotated_frame, ref_vis)
         annotated_frame = triangle_annotator.annotate(annotated_frame, ball_detections)
         out.write(annotated_frame)
 
@@ -691,6 +880,9 @@ def rerender_video(source_video: str, tracking_csv: str, output_video: str,
         color=sv.ColorPalette.from_hex(['#00BFFF', '#FF1493', '#FFD700']),
         text_color=sv.Color.from_hex('#000000'),
         text_position=sv.Position.BOTTOM_CENTER,
+        text_scale=0.5,
+        text_thickness=1,
+        text_padding=6,
     )
     triangle_annotator = sv.TriangleAnnotator(
         color=sv.Color.from_hex('#FFD700'),
@@ -842,7 +1034,7 @@ def player_tracking(player_model=None, field_model=None, on_frame=None, cancel_e
         player_only = detections[detections.class_id == PLAYER_ID]
         player_crops = [sv.crop_image(frame, xyxy) for xyxy in player_only.xyxy]
         crops += player_crops
-        if len(crops) >= 200:
+        if len(crops) >= 260:
             break
 
     team_classifier = TeamClassifier(device=DEVICE)
@@ -865,7 +1057,7 @@ class RealTimeTracker:
     INFER_SIZE = 640
     FIELD_REFRESH_INTERVAL = 10
     TEAM_CLASSIFY_INTERVAL = 5
-    MIN_CROPS_BEFORE_FIT   = 80   # fit team classifier after accumulating this many crops
+    MIN_CROPS_BEFORE_FIT   = 100  # fit team classifier after accumulating this many crops
     MAX_PITCH_JUMP         = 15.0
 
     def __init__(self, player_model, field_model):
@@ -898,9 +1090,11 @@ class RealTimeTracker:
 
         self._track_last_pitch: dict = {}
         self._track_team_history: dict = {}
+        self._gk_side_locked: dict = {}
         self._gk_last_seen: dict = {}
-        self._gk_pitch_side: dict = {}
-        self._fresh_id_counter = [90000]
+        self._gk_side_id: dict[str, int] = {}   # 'left'/'right' -> reserved tracker ID
+        self._team_label_flipped: bool | None = None
+        self._pixel_history: dict = {}
 
         self._frame_number = 0
         self._orig_h: int | None = None
@@ -908,14 +1102,15 @@ class RealTimeTracker:
 
         self._ellipse_ann = sv.EllipseAnnotator(
             color=sv.ColorPalette.from_hex(['#00BFFF', '#FF1493', '#FFD700']),
-            thickness=1,
+            thickness=2,
         )
         self._label_ann = sv.LabelAnnotator(
             color=sv.ColorPalette.from_hex(['#00BFFF', '#FF1493', '#FFD700']),
             text_color=sv.Color.from_hex('#000000'),
             text_position=sv.Position.BOTTOM_CENTER,
-            text_scale=0.4,
+            text_scale=0.35,
             text_thickness=1,
+            text_padding=3,
         )
         self._triangle_ann = sv.TriangleAnnotator(
             color=sv.Color.from_hex('#FFD700'),
@@ -929,9 +1124,6 @@ class RealTimeTracker:
             annotated_jpeg: JPEG bytes of the annotated frame.
             live_rows:      list of dicts suitable for the PitchRadar WebSocket payload.
         """
-        GK_MAX_GAP = 90
-        GK_SIDE_LO, GK_SIDE_HI = 25.0, 80.0
-
         fn = self._frame_number
         if self._orig_h is None:
             self._orig_h, self._orig_w = frame.shape[:2]
@@ -952,17 +1144,24 @@ class RealTimeTracker:
         ball_detections = detections[detections.class_id == BALL_ID]
         ball_detections.xyxy = sv.pad_boxes(xyxy=ball_detections.xyxy, px=10)
 
-        # 3. Track players
-        player_detections = detections[detections.class_id != BALL_ID]
-        player_detections = player_detections.with_nms(threshold=0.5, class_agnostic=False)
-        player_detections = _boxmot_to_sv(self.tracker.update(_sv_to_boxmot(player_detections), frame))
+        # 3. Track players/GKs only — referees excluded from tracker (no persistent IDs)
+        non_ball = detections[detections.class_id != BALL_ID]
+        non_ball = non_ball.with_nms(threshold=0.5, class_agnostic=False)
+        referee_dets_raw = non_ball[non_ball.class_id == REFEREE_ID]
+        trackable        = non_ball[non_ball.class_id != REFEREE_ID]
 
-        goalkeepers = player_detections[player_detections.class_id == GOALKEEPER_ID]
-        players     = player_detections[player_detections.class_id == PLAYER_ID]
-        referees    = player_detections[player_detections.class_id == REFEREE_ID]
+        if self._cached_transformer is not None and len(trackable) > 0:
+            feet = trackable.get_anchors_coordinates(sv.Position.BOTTOM_CENTER)
+            pitch_pts = self._cached_transformer.transform_points(feet)
+            on_pitch = (
+                (pitch_pts[:, 0] >= -5) & (pitch_pts[:, 0] <= 110) &
+                (pitch_pts[:, 1] >= -5) & (pitch_pts[:, 1] <= 73)
+            )
+            trackable = trackable[on_pitch]
 
-        gk_ids  = set(goalkeepers.tracker_id.tolist()) if goalkeepers.tracker_id is not None else set()
-        ref_ids = set(referees.tracker_id.tolist())    if referees.tracker_id  is not None else set()
+        player_detections = _boxmot_to_sv(self.tracker.update(_sv_to_boxmot(trackable), frame))
+
+        ref_ids: set = set()
 
         # 4. Field homography (cached, refresh every N frames)
         if fn % self.FIELD_REFRESH_INTERVAL == 0:
@@ -971,90 +1170,159 @@ class RealTimeTracker:
                 key_points = sv.KeyPoints.from_inference(r_field)
                 key_points.xy[0][:, 0] *= scale_x
                 key_points.xy[0][:, 1] *= scale_y
-                kp_filter  = key_points.confidence[0] > 0.5
+                kp_filter  = key_points.confidence[0] > 0.75
                 frame_ref  = key_points.xy[0][kp_filter]
                 pitch_ref  = np.array(self.config.vertices)[kp_filter]
-                if len(frame_ref) >= 4:
+                if len(frame_ref) >= 6:
+                    candidate = ViewTransformer(source=frame_ref, target=pitch_ref)
+                    if len(non_ball) > 0:
+                        all_feet  = non_ball.get_anchors_coordinates(sv.Position.BOTTOM_CENTER)
+                        proj_feet = candidate.transform_points(all_feet)
+                        on_pitch  = (
+                            (proj_feet[:, 0] >= -20) & (proj_feet[:, 0] <= 125) &
+                            (proj_feet[:, 1] >= -20) & (proj_feet[:, 1] <= 88)
+                        )
+                        pct_on = float(on_pitch.sum()) / len(all_feet)
+                    else:
+                        pct_on = 1.0
                     kp_span = float(pitch_ref[:, 0].max() - pitch_ref[:, 0].min())
-                    if kp_span >= self._best_kp_span:
-                        self._cached_transformer = ViewTransformer(source=frame_ref, target=pitch_ref)
-                        self._best_kp_span = kp_span
+                    if pct_on >= 0.4 and kp_span >= self._best_kp_span:
+                        self._cached_transformer = candidate
+                        self._best_kp_span       = kp_span
             except Exception:
                 pass
 
         transformer   = self._cached_transformer
         has_transform = transformer is not None
 
-        # 5. GK re-link + teleport guard
+        # 5. Teleport guard — update position history for all tracked detections
         if has_transform and player_detections.tracker_id is not None:
-            positions    = player_detections.get_anchors_coordinates(sv.Position.BOTTOM_CENTER)
-            pitch_pos    = transformer.transform_points(positions)
-            new_ids      = player_detections.tracker_id.copy()
-            for i, tid in enumerate(new_ids):
-                current_pos = pitch_pos[i]
-                tid_int = int(tid)
-                is_teleport = False
-                if tid_int in self._track_last_pitch:
-                    if np.linalg.norm(current_pos - self._track_last_pitch[tid_int]) > self.MAX_PITCH_JUMP:
-                        is_teleport = True
-                if not is_teleport:
-                    self._track_last_pitch[tid_int] = current_pos
-                if tid_int in gk_ids:
-                    px = current_pos[0]
-                    if tid_int not in self._gk_pitch_side:
-                        self._gk_pitch_side[tid_int] = ('left' if px < GK_SIDE_LO else
-                                                        'right' if px > GK_SIDE_HI else None)
-                    long_abs   = (tid_int in self._gk_last_seen and
-                                  (fn - self._gk_last_seen[tid_int]) > GK_MAX_GAP)
-                    canon      = self._gk_pitch_side.get(tid_int)
-                    wrong_side = ((canon == 'left' and px > GK_SIDE_HI) or
-                                  (canon == 'right' and px < GK_SIDE_LO))
-                    if long_abs or wrong_side:
-                        fid = self._fresh_id_counter[0]; self._fresh_id_counter[0] += 1
-                        new_ids[i] = fid
-                        self._gk_pitch_side[fid] = ('left' if px < GK_SIDE_LO else
-                                                     'right' if px > GK_SIDE_HI else None)
-                        if not is_teleport:
-                            self._track_last_pitch[fid] = current_pos
-                    else:
-                        self._gk_last_seen[tid_int] = fn
-            player_detections.tracker_id = new_ids
+            _all_feet  = player_detections.get_anchors_coordinates(sv.Position.BOTTOM_CENTER)
+            _all_pitch = transformer.transform_points(_all_feet)
+            for _i, _tid in enumerate(player_detections.tracker_id):
+                _tid_int = int(_tid)
+                _cur     = _all_pitch[_i]
+                if _tid_int not in self._track_last_pitch or \
+                        np.linalg.norm(_cur - self._track_last_pitch[_tid_int]) <= self.MAX_PITCH_JUMP:
+                    self._track_last_pitch[_tid_int] = _cur
 
-        # 6. Team classification (bootstrap until enough crops)
+        # 6. Assign GK team color — fresh slice, pitch-X based, boxmot IDs untouched
+        GK_MAX_AGE  = 300  # ~10s at 30fps
+        goalkeepers = player_detections[player_detections.class_id == GOALKEEPER_ID]
+        if len(goalkeepers) > 0:
+            # Evict stale GK IDs absent for > GK_MAX_AGE frames.
+            for _gi in range(len(goalkeepers)):
+                _tid = int(goalkeepers.tracker_id[_gi])
+                last = self._gk_last_seen.get(_tid)
+                if last is not None and (fn - last) > GK_MAX_AGE:
+                    _all_frame_ids = set(int(t) for t in player_detections.tracker_id) if player_detections.tracker_id is not None else set()
+                    _next = max(_all_frame_ids) + 1 if _all_frame_ids else fn + 90000
+                    goalkeepers.tracker_id[_gi] = _next
+                    _tid = _next
+                self._gk_last_seen[_tid] = fn
+
+            gk_pitch_pos = (transformer.transform_points(
+                goalkeepers.get_anchors_coordinates(sv.Position.BOTTOM_CENTER)
+            ) if has_transform else None)
+            _assign_gk_team_color(goalkeepers, self._gk_side_locked, gk_pitch_pos, orig_w)
+
+            # Enforce permanent per-side tracker IDs.
+            # class_id 1 = left GK, class_id 0 = right GK.
+            _all_frame_ids = set(int(t) for t in player_detections.tracker_id) if player_detections.tracker_id is not None else set()
+            _side_map = {1: 'left', 0: 'right'}
+            for _gi in range(len(goalkeepers)):
+                _team = int(goalkeepers.class_id[_gi])
+                _side = _side_map.get(_team)
+                if _side is None:
+                    continue
+                _cur_tid = int(goalkeepers.tracker_id[_gi])
+                if _side not in self._gk_side_id:
+                    self._gk_side_id[_side] = _cur_tid
+                elif self._gk_side_id[_side] != _cur_tid:
+                    goalkeepers.tracker_id[_gi] = self._gk_side_id[_side]
+
+            # Deduplicate: if two GKs still share an ID after remapping (very rare).
+            seen_gk_ids: set = set()
+            for _gi in range(len(goalkeepers)):
+                _gid = int(goalkeepers.tracker_id[_gi])
+                if _gid in seen_gk_ids:
+                    _next = max(_all_frame_ids) + 1
+                    goalkeepers.tracker_id[_gi] = _next
+                    _all_frame_ids.add(_next)
+                seen_gk_ids.add(int(goalkeepers.tracker_id[_gi]))
+        gk_ids = set(goalkeepers.tracker_id.tolist()) if goalkeepers.tracker_id is not None else set()
+
+        # 7. Team classification — fresh slice after GK IDs are settled
+        players = player_detections[player_detections.class_id == PLAYER_ID]
         if len(players) > 0:
             crops = [sv.crop_image(frame, xyxy) for xyxy in players.xyxy]
             if self.team_classifier is None:
                 self._team_crops.extend(crops)
+                print(f"[TEAM rt fn={fn}] crops={len(self._team_crops)}/{self.MIN_CROPS_BEFORE_FIT}", flush=True)
                 if len(self._team_crops) >= self.MIN_CROPS_BEFORE_FIT:
                     self.team_classifier = TeamClassifier(device=DEVICE)
                     self.team_classifier.fit(self._team_crops)
-            if self.team_classifier is not None and fn % self.TEAM_CLASSIFY_INTERVAL == 0:
+                    print(f"[TEAM rt fn={fn}] classifier fit!", flush=True)
+                    new_cls = self.team_classifier.predict(crops)
+                    _reserved = set(self._gk_side_id.values())
+                    for tid, cls in zip(players.tracker_id, new_cls):
+                        if int(tid) not in _reserved:
+                            self._team_id_cache[int(tid)] = int(cls)
+            elif fn % self.TEAM_CLASSIFY_INTERVAL == 0:
                 new_cls = self.team_classifier.predict(crops)
+                _reserved = set(self._gk_side_id.values())
                 for tid, cls in zip(players.tracker_id, new_cls):
-                    self._team_id_cache[int(tid)] = int(cls)
-            players.class_id = np.array(
-                [self._team_id_cache.get(int(tid), 0) for tid in players.tracker_id]
-            )
+                    if int(tid) not in _reserved:
+                        self._team_id_cache[int(tid)] = int(cls)
 
-        if len(goalkeepers) > 0 and len(players) > 0:
-            goalkeepers.class_id = resolve_goalkeepers_team_id(players, goalkeepers)
-        if len(referees) > 0:
-            referees.class_id = np.full(len(referees), -1, dtype=int)
+            # Resolve KMeans label orientation once, using outfield players near GKs.
+            # GK jerseys are a third colour (FIFA rule) so predicting GK crops is unreliable.
+            if self._team_label_flipped is None and len(goalkeepers) >= 2 and len(players) >= 4:
+                gk_positions = goalkeepers.get_anchors_coordinates(sv.Position.BOTTOM_CENTER)
+                pl_positions = players.get_anchors_coordinates(sv.Position.BOTTOM_CENTER)
+                votes_match = 0
+                votes_total = 0
+                for gi in range(len(goalkeepers)):
+                    gk_team = int(goalkeepers.class_id[gi])
+                    if gk_team < 0:
+                        continue
+                    dists = np.linalg.norm(pl_positions - gk_positions[gi], axis=1)
+                    nearest = np.argsort(dists)[:3]
+                    near_crops = [sv.crop_image(frame, players.xyxy[pi]) for pi in nearest]
+                    near_preds = self.team_classifier.predict(near_crops)
+                    votes_match += int(np.sum(near_preds == gk_team))
+                    votes_total += len(near_preds)
+                if votes_total > 0:
+                    self._team_label_flipped = (votes_match / votes_total) < 0.5
+                    print(f"[TEAM rt fn={fn}] flip={self._team_label_flipped} match={votes_match}/{votes_total}", flush=True)
 
-        player_detections = sv.Detections.merge([players, goalkeepers, referees])
+            players.class_id = np.array([
+                (1 - self._team_id_cache.get(int(tid), 0)) if self._team_label_flipped
+                else self._team_id_cache.get(int(tid), 0)
+                for tid in players.tracker_id
+            ])
+
+        # Rebuild merged detections from correctly-labelled, fresh slices
+        player_detections = sv.Detections.merge([players, goalkeepers])
 
         # Team flip guard
         if player_detections.tracker_id is not None:
             for i, tid in enumerate(player_detections.tracker_id):
-                team = player_detections.class_id[i]
-                if tid in self._track_team_history:
-                    if self._track_team_history[tid] != team and team != -1:
-                        player_detections.class_id[i] = self._track_team_history[int(tid)]
-                elif team != -1:
+                if int(tid) in gk_ids:
+                    continue
+                team = int(player_detections.class_id[i])
+                if team == -1:
+                    continue
+                prev = self._track_team_history.get(int(tid))
+                if prev is None:
                     self._track_team_history[int(tid)] = team
+                elif prev != team:
+                    self._track_team_history[int(tid)] = team
+                    player_detections.class_id[i] = team
 
         # 7. Build live_rows for minimap
         live_rows: list = []
+        seen_ids: set   = set()
         positions       = None
         pitch_positions = None
         if player_detections.tracker_id is not None and len(player_detections) > 0:
@@ -1063,6 +1331,9 @@ class RealTimeTracker:
 
             for i, tid in enumerate(player_detections.tracker_id):
                 tid_int = int(tid)
+                if tid_int in seen_ids:
+                    continue
+                seen_ids.add(tid_int)
                 role = ('goalkeeper' if tid_int in gk_ids else
                         'referee'   if tid_int in ref_ids else 'player')
                 if pitch_positions is not None:
@@ -1109,9 +1380,14 @@ class RealTimeTracker:
 
         annotated = self._ellipse_ann.annotate(frame.copy(), player_detections)
         annotated = self._label_ann.annotate(annotated, player_detections, labels)
+        annotated = draw_direction_chevrons(annotated, player_detections, self._pixel_history)
+        if len(referee_dets_raw) > 0:
+            ref_vis = referee_dets_raw[np.ones(len(referee_dets_raw), dtype=bool)]
+            ref_vis.class_id = np.full(len(ref_vis), 2, dtype=int)
+            annotated = self._ellipse_ann.annotate(annotated, ref_vis)
         annotated = self._triangle_ann.annotate(annotated, ball_detections)
 
-        ok, jpg = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 70])
+        ok, jpg = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 92])
         jpeg_bytes = jpg.tobytes() if ok else b""
 
         self._frame_number += 1

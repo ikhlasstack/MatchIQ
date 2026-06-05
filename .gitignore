@@ -19,3 +19,7 @@ Saved_Matches/
 Match_Data_CSV/*
 Match_Data_CSV/1_tracking.csv
 sn-reid/
+context.txt
+PIPELINE_EXPLAINED.md
+context.txt
+setup.sh

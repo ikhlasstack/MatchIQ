@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Upload, CheckCircle, Loader2, Download, FileText, Film, ChevronRight, AlertCircle,
@@ -12,6 +12,7 @@ import MatchOutcomeChart from "./tabs/MatchOutcomeChart";
 import PitchRadar from "./tabs/PitchRadar";
 import VideoTab from "./tabs/VideoTab";
 import PlayerNamingModal, { type NamesMap } from "./PlayerNamingModal";
+import PlayerDrawer, { type OverlayRow, type MovementRow } from "./PlayerDrawer";
 
 const API = "http://localhost:8000";
 
@@ -28,7 +29,7 @@ export type OutcomeData = {
   territory: { t0: number; t1: number };
   momentum: { t0: number; t1: number };
 };
-export type TrackingRow = { id: number; team: number; role: string; x: number; y: number };
+export type TrackingRow = { id: number; team: number; role: string; x: number; y: number; px?: number; py?: number; bbox?: [number,number,number,number]; vx?: number; vy?: number; speed?: number };
 export type AllTrackingData = { fps: number; total_frames: number; frames: Record<string, TrackingRow[]> };
 
 const PROCESSING_STEPS = [
@@ -332,7 +333,7 @@ export default function DemoClient() {
   const [doneSteps, setDoneSteps] = useState(0);
   const [fileName, setFileName] = useState("");
   const [errorMsg, setErrorMsg] = useState("");
-  const [activeTab, setActiveTab] = useState<TabId>("fatigue");
+  const [activeTab, setActiveTab] = useState<TabId>("video");
 
   /* Real data from API */
   const [fatigueData, setFatigueData] = useState<FatigueRow[] | null>(null);
@@ -340,6 +341,7 @@ export default function DemoClient() {
   const [outcomeData, setOutcomeData] = useState<OutcomeData | null>(null);
   const [trackingData, setTrackingData] = useState<TrackingRow[] | null>(null);
   const [allTrackingData, setAllTrackingData] = useState<AllTrackingData | null>(null);
+  const [movementData, setMovementData] = useState<MovementRow[] | null>(null);
   const [livePositions, setLivePositions] = useState<TrackingRow[] | null>(null);
   const [currentFrame, setCurrentFrame] = useState(0);
   const [isStreaming,   setIsStreaming]   = useState(false);
@@ -385,18 +387,20 @@ export default function DemoClient() {
   /* Re-fetch from the saved match after corrections are applied */
   const fetchSavedResults = useCallback(async (matchId: string) => {
     try {
-      const [fat, goal, out, track, allTrack] = await Promise.all([
+      const [fat, goal, out, track, allTrack, mov] = await Promise.all([
         fetch(`${API}/matches/${matchId}/results/fatigue`).then(r => r.json()),
         fetch(`${API}/matches/${matchId}/results/goal-prob`).then(r => r.json()),
         fetch(`${API}/matches/${matchId}/results/outcome`).then(r => r.json()),
         fetch(`${API}/matches/${matchId}/results/tracking`).then(r => r.json()),
         fetch(`${API}/matches/${matchId}/results/tracking/frames`).then(r => r.json()),
+        fetch(`${API}/matches/${matchId}/results/movement`).then(r => r.ok ? r.json() : []),
       ]);
       setFatigueData(fat);
       setGoalProbData(goal);
       setOutcomeData(out);
       setTrackingData(track);
       setAllTrackingData(allTrack);
+      setMovementData(mov);
     } catch (_) {
       /* non-fatal */
     }
@@ -443,10 +447,13 @@ export default function DemoClient() {
           } else if (msg.done) {
             ws.close();
             setStage("done");
-            await fetchResults();
             if (msg.match_id) {
-              setSavedMatchId(msg.match_id as string);
+              const mid = msg.match_id as string;
+              setSavedMatchId(mid);
+              await fetchSavedResults(mid);
               setShowNaming(true);
+            } else {
+              await fetchResults();
             }
           }
         }
@@ -454,7 +461,7 @@ export default function DemoClient() {
     };
 
     ws.onerror = () => { /* non-fatal */ };
-  }, [fetchResults]);
+  }, [fetchResults, fetchSavedResults]);
 
   /* Clear live positions when streaming stops */
   useEffect(() => {
@@ -559,10 +566,22 @@ export default function DemoClient() {
     wsRef.current?.close();
     setStage("idle"); setDoneSteps(0); setFileName(""); setErrorMsg("");
     setFatigueData(null); setGoalProbData(null); setOutcomeData(null);
-    setTrackingData(null); setAllTrackingData(null); setLivePositions(null); setCurrentFrame(0);
+    setTrackingData(null); setAllTrackingData(null); setMovementData(null); setLivePositions(null); setCurrentFrame(0);
     setSavedMatchId(null); setShowNaming(false); setNames({ players: {}, teams: {} });
     setTeamOverrides({}); setRoleOverrides({});
   };
+
+  const frameRows = useMemo<OverlayRow[] | null>(() => {
+    if (livePositions) return livePositions as OverlayRow[] | null;
+    if (!allTrackingData) return trackingData as OverlayRow[] | null;
+    const keys = Object.keys(allTrackingData.frames);
+    if (!keys.length) return trackingData as OverlayRow[] | null;
+    const best = keys.reduce((a, b) =>
+      Math.abs(Number(a) - currentFrame) <= Math.abs(Number(b) - currentFrame) ? a : b);
+    return (allTrackingData.frames[best] ?? trackingData) as OverlayRow[] | null;
+  }, [livePositions, allTrackingData, trackingData, currentFrame]);
+
+  const showDrawer = activeTab === "video" || inputMode === "realtime";
 
   return (
     <div style={{ minHeight: "100vh", background: "#0a0a0a", paddingTop: "64px" }}>
@@ -599,7 +618,7 @@ export default function DemoClient() {
       </div>
 
       {/* Two-column layout */}
-      <div className="wrap" style={{ paddingTop: "2rem", paddingBottom: "3rem" }}>
+      <div className="wrap" style={{ paddingTop: "1.25rem", paddingBottom: "2rem" }}>
         {/* Mode toggle */}
         <div style={{ display: "flex", gap: "0.5rem", marginBottom: "1.5rem" }}>
           {(["upload", "realtime"] as InputMode[]).map(m => (
@@ -619,10 +638,10 @@ export default function DemoClient() {
           ))}
         </div>
 
-        <div style={{ display: "grid", gridTemplateColumns: "340px 1fr", gap: "2rem", alignItems: "start" }}>
+        <div style={{ display: "grid", gridTemplateColumns: showDrawer ? "280px 1fr auto" : "280px 1fr", gap: "1.5rem", alignItems: "start" }}>
 
           {/* ── Left Panel ── */}
-          <div style={{ background: "#111", border: "1px solid #2a2a2a", borderRadius: "1.25rem", padding: "1.75rem", position: "sticky", top: "80px" }}>
+          <div style={{ background: "#111", border: "1px solid #2a2a2a", borderRadius: "1.25rem", padding: "1.25rem", position: "sticky", top: "80px" }}>
             {inputMode === "upload" ? (
               <>
                 <p style={{ fontSize: "0.7rem", textTransform: "uppercase", letterSpacing: "0.12em", color: "#D4AF37", fontWeight: 600, marginBottom: "1.25rem" }}>
@@ -681,7 +700,7 @@ export default function DemoClient() {
                 </div>
 
                 {/* Tab content */}
-                <div style={{ background: "#111", border: "1px solid #2a2a2a", borderRadius: "1.25rem", padding: "2rem", minHeight: "480px", position: "relative" }}>
+                <div style={{ background: "#111", border: "1px solid #2a2a2a", borderRadius: "1.25rem", padding: "1.25rem", minHeight: "480px", position: "relative" }}>
                   <AnimatePresence mode="wait">
                     <motion.div key={activeTab}
                       initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}
@@ -720,78 +739,73 @@ export default function DemoClient() {
               </>
             ) : (
               /* Real-time mode right panel — annotated feed + scrubber + minimap */
-              <div style={{ display: "flex", flexDirection: "column", gap: "1.25rem" }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
 
                 {/* Canvas */}
-                <div style={{ background: "#000", border: "1px solid #2a2a2a", borderRadius: "1.25rem", overflow: "hidden", minHeight: "320px", display: "flex", alignItems: "center", justifyContent: "center", position: "relative" }}>
-                  {/* Live / scrubbing badge */}
-                  {rtHasFrame && (
-                    <div style={{ position: "absolute", top: 10, left: 10, zIndex: 10, display: "flex", alignItems: "center", gap: "6px", background: "rgba(0,0,0,0.75)", border: `1px solid ${rtIsLive ? "rgba(239,68,68,0.55)" : "rgba(212,175,55,0.5)"}`, borderRadius: "6px", padding: "4px 10px" }}>
-                      <span style={{ width: 7, height: 7, borderRadius: "50%", display: "inline-block", background: rtIsLive ? "#ef4444" : "#D4AF37", animation: rtIsLive ? "livePulse 1.2s ease-in-out infinite" : "none" }} />
-                      <span style={{ fontSize: "0.68rem", fontWeight: 700, letterSpacing: "0.08em", color: rtIsLive ? "#ef4444" : "#D4AF37" }}>
-                        {rtIsLive ? "LIVE" : rtIsPlaying ? "PLAYING" : "PAUSED"}
-                      </span>
-                    </div>
-                  )}
-                  <canvas ref={annotRef} style={{ width: "100%", display: "block" }} />
+                <div style={{ position: "relative" }}>
+                  <div style={{ position: "absolute", top: 10, left: 10, zIndex: 10, display: "flex", alignItems: "center", gap: "6px", background: "rgba(0,0,0,0.75)", border: `1px solid ${rtIsLive ? "rgba(239,68,68,0.55)" : "rgba(212,175,55,0.5)"}`, borderRadius: "6px", padding: "4px 10px" }}>
+                    <span style={{ width: 7, height: 7, borderRadius: "50%", display: "inline-block", background: rtIsLive ? "#ef4444" : "#D4AF37", animation: rtIsLive ? "livePulse 1.2s ease-in-out infinite" : "none" }} />
+                    <span style={{ fontSize: "0.68rem", fontWeight: 700, letterSpacing: "0.08em", color: rtIsLive ? "#ef4444" : "#D4AF37" }}>
+                      {rtIsLive ? "LIVE" : rtIsPlaying ? "PLAYING" : "PAUSED"}
+                    </span>
+                  </div>
+                  <canvas ref={annotRef} style={{ width: "100%", height: "auto", display: "block", borderRadius: "0.75rem", border: "1px solid #2a2a2a", background: "#07090f" }} />
                   {!rtHasFrame && (
-                    <p style={{ position: "absolute", fontSize: "0.8rem", color: "#333" }}>
+                    <p style={{ position: "absolute", top: "50%", left: "50%", transform: "translate(-50%,-50%)", fontSize: "0.8rem", color: "#333", margin: 0 }}>
                       Annotated feed will appear here
                     </p>
                   )}
                 </div>
 
-                {/* Scrubber — only shown once frames arrive */}
-                {rtHasFrame && (
-                  <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
-                    <div style={{ display: "flex", justifyContent: "space-between" }}>
-                      <span style={{ fontSize: "0.7rem", color: "#555" }}>
-                        Frame&nbsp;<strong style={{ color: "#888" }}>{rtFrameIdx + 1}</strong>
-                        &nbsp;/&nbsp;{rtFrameCount}
-                      </span>
-                      <span style={{ fontSize: "0.7rem", fontWeight: 700, color: rtIsLive ? "#ef4444" : "#D4AF37" }}>
-                        {rtIsLive ? "● LIVE" : "◈ Scrubbing"}
-                      </span>
-                    </div>
-                    <input
-                      type="range"
-                      min={0}
-                      max={Math.max(rtFrameCount - 1, 0)}
-                      value={rtFrameIdx}
-                      onChange={e => {
-                        setRtIsLive(false);
-                        setRtIsPlaying(false);
-                        setRtFrameIdx(Number(e.target.value));
-                      }}
-                      style={{ width: "100%", accentColor: "#D4AF37", cursor: "pointer", height: "4px" }}
-                    />
-
-                    {/* Controls */}
-                    <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap", marginTop: "0.25rem" }}>
-                      <button
-                        onClick={() => { setRtIsLive(false); setRtIsPlaying(p => !p); }}
-                        style={{ padding: "0.38rem 0.85rem", borderRadius: "0.5rem", fontSize: "0.82rem", fontWeight: 700, cursor: "pointer", background: (rtIsPlaying && !rtIsLive) ? "rgba(212,175,55,0.12)" : "transparent", border: (rtIsPlaying && !rtIsLive) ? "1px solid #D4AF37" : "1px solid #2a2a2a", color: (rtIsPlaying && !rtIsLive) ? "#D4AF37" : "#888" }}>
-                        {rtIsPlaying && !rtIsLive ? "⏸ Pause" : "▶ Play"}
-                      </button>
-                      <button
-                        onClick={rtGoLive}
-                        style={{ padding: "0.38rem 0.85rem", borderRadius: "0.5rem", fontSize: "0.82rem", fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", gap: "5px", background: rtIsLive ? "rgba(239,68,68,0.1)" : "transparent", border: rtIsLive ? "1px solid rgba(239,68,68,0.5)" : "1px solid #2a2a2a", color: rtIsLive ? "#ef4444" : "#888" }}>
-                        {rtIsLive && <span style={{ width: 7, height: 7, borderRadius: "50%", background: "#ef4444", display: "inline-block", animation: "livePulse 1.2s ease-in-out infinite" }} />}
-                        ⏺ Live
-                      </button>
-                      <select
-                        value={rtPlaySpeed}
-                        onChange={e => setRtPlaySpeed(Number(e.target.value))}
-                        style={{ padding: "0.38rem 0.5rem", borderRadius: "0.5rem", fontSize: "0.82rem", fontWeight: 600, background: "#111", border: "1px solid #2a2a2a", color: "#888", cursor: "pointer" }}>
-                        <option value={200}>0.25×</option>
-                        <option value={100}>0.5×</option>
-                        <option value={50}>1×</option>
-                        <option value={25}>2×</option>
-                        <option value={12}>4×</option>
-                      </select>
-                    </div>
+                {/* Scrubber */}
+                <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between" }}>
+                    <span style={{ fontSize: "0.7rem", color: "#555" }}>
+                      Frame&nbsp;<strong style={{ color: "#888" }}>{rtFrameIdx + 1}</strong>
+                      &nbsp;/&nbsp;{rtFrameCount}
+                    </span>
+                    <span style={{ fontSize: "0.7rem", fontWeight: 700, color: rtIsLive ? "#ef4444" : "#D4AF37" }}>
+                      {rtIsLive ? "● LIVE" : "◈ Scrubbing"}
+                    </span>
                   </div>
-                )}
+                  <input
+                    type="range"
+                    min={0}
+                    max={Math.max(rtFrameCount - 1, 0)}
+                    value={rtFrameIdx}
+                    onChange={e => {
+                      setRtIsLive(false);
+                      setRtIsPlaying(false);
+                      setRtFrameIdx(Number(e.target.value));
+                    }}
+                    style={{ width: "100%", accentColor: "#D4AF37", cursor: "pointer", height: "4px" }}
+                  />
+                </div>
+
+                {/* Controls */}
+                <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
+                  <button
+                    onClick={() => { setRtIsLive(false); setRtIsPlaying(p => !p); }}
+                    style={{ padding: "0.38rem 0.85rem", borderRadius: "0.5rem", fontSize: "0.82rem", fontWeight: 700, cursor: "pointer", background: (rtIsPlaying && !rtIsLive) ? "rgba(212,175,55,0.12)" : "transparent", border: (rtIsPlaying && !rtIsLive) ? "1px solid #D4AF37" : "1px solid #2a2a2a", color: (rtIsPlaying && !rtIsLive) ? "#D4AF37" : "#888" }}>
+                    {rtIsPlaying && !rtIsLive ? "⏸ Pause" : "▶ Play"}
+                  </button>
+                  <button
+                    onClick={rtGoLive}
+                    style={{ padding: "0.38rem 0.85rem", borderRadius: "0.5rem", fontSize: "0.82rem", fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", gap: "5px", background: rtIsLive ? "rgba(239,68,68,0.1)" : "transparent", border: rtIsLive ? "1px solid rgba(239,68,68,0.5)" : "1px solid #2a2a2a", color: rtIsLive ? "#ef4444" : "#888" }}>
+                    {rtIsLive && <span style={{ width: 7, height: 7, borderRadius: "50%", background: "#ef4444", display: "inline-block", animation: "livePulse 1.2s ease-in-out infinite" }} />}
+                    ⏺ Live
+                  </button>
+                  <select
+                    value={rtPlaySpeed}
+                    onChange={e => setRtPlaySpeed(Number(e.target.value))}
+                    style={{ padding: "0.38rem 0.5rem", borderRadius: "0.5rem", fontSize: "0.82rem", fontWeight: 600, background: "#111", border: "1px solid #2a2a2a", color: "#888", cursor: "pointer" }}>
+                    <option value={200}>0.25×</option>
+                    <option value={100}>0.5×</option>
+                    <option value={50}>1×</option>
+                    <option value={25}>2×</option>
+                    <option value={12}>4×</option>
+                  </select>
+                </div>
 
                 {/* Live minimap */}
                 <div style={{ background: "#111", border: "1px solid #2a2a2a", borderRadius: "1.25rem", padding: "1.5rem" }}>
@@ -802,13 +816,37 @@ export default function DemoClient() {
                     data={rtLivePositions}
                     allData={null}
                     currentFrame={undefined}
-                    names={{ players: {}, teams: {} }}
+                    names={names}
                     floating={false}
                   />
                 </div>
               </div>
             )}
           </div>
+
+          {/* ── Drawer column ── */}
+          {showDrawer && (
+            <div style={{ position: "sticky", top: "80px" }}>
+              <PlayerDrawer
+                rows={inputMode === "realtime" ? (rtLivePositions as OverlayRow[] | null) : frameRows}
+                names={names}
+                movement={movementData}
+                teamOverrides={teamOverrides}
+                roleOverrides={roleOverrides}
+                onTeamOverride={(id, team) => setTeamOverrides(p => ({ ...p, [id]: team }))}
+                onRoleOverride={(id, role) => setRoleOverrides(p => ({ ...p, [id]: role }))}
+                onNameChange={(id, name) => setNames(p => ({ ...p, players: { ...p.players, [String(id)]: name } }))}
+                onNameSave={() => {
+                  if (!savedMatchId) return;
+                  fetch(`${API}/matches/${savedMatchId}/names`, {
+                    method: "PUT",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(names),
+                  });
+                }}
+              />
+            </div>
+          )}
 
         </div>
       </div>
